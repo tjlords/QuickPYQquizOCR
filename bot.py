@@ -84,41 +84,91 @@ if BOT_VERSION == "v20":
         await update.message.reply_text("🔄 Processing PDF...")
         
         try:
+            # Read and encode PDF
             with open(pdf_path, "rb") as f:
                 pdf_data = base64.b64encode(f.read()).decode("utf-8")
             
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+            # FIXED Gemini API URL
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            
             payload = {
                 "contents": [{
                     "parts": [
-                        {"inlineData": {"mimeType": "application/pdf", "data": pdf_data}},
-                        {"text": "Create 5 MCQs from PDF. Format: 1. Question? (a) opt1 (b) opt2 (c) opt3 ✅ (d) opt4 Ex: explanation"}
+                        {
+                            "inlineData": {
+                                "mimeType": "application/pdf",
+                                "data": pdf_data
+                            }
+                        },
+                        {
+                            "text": (
+                                "Extract text from this PDF and create 5 multiple choice questions. "
+                                "Format each question as:\n\n"
+                                "1. Question text?\n"
+                                "(a) Option 1\n"
+                                "(b) Option 2\n"
+                                "(c) Option 3 ✅\n"
+                                "(d) Option 4\n"
+                                "Ex: Brief explanation\n\n"
+                                "Make sure questions are based ONLY on the PDF content. "
+                                "Mark the correct answer with ✅."
+                            )
+                        }
                     ]
                 }]
             }
             
-            response = requests.post(url, json=payload, timeout=30)
+            print(f"📤 Sending request to Gemini API...")
+            response = requests.post(url, json=payload, timeout=60)
+            print(f"📥 Response status: {response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                if len(text) > 4000:
-                    text = text[:4000] + "..."
-                await update.message.reply_text(f"📝 MCQs:\n\n{text}")
-                await update.message.reply_text("✅ Done!")
-            else:
-                await update.message.reply_text(f"❌ API Error: {response.status_code}")
+                print("✅ Gemini API success")
                 
+                # Extract text from response
+                text = ""
+                try:
+                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError) as e:
+                    print(f"❌ Error parsing response: {e}")
+                    await update.message.reply_text("❌ Failed to parse AI response")
+                    return
+                
+                if text:
+                    if len(text) > 4000:
+                        text = text[:4000] + "...\n\n(Output truncated)"
+                    await update.message.reply_text(f"📝 **Generated MCQs:**\n\n{text}")
+                    await update.message.reply_text("✅ Processing Complete!")
+                else:
+                    await update.message.reply_text("❌ No content generated from PDF")
+                    
+            else:
+                error_msg = f"❌ API Error: {response.status_code}\n"
+                try:
+                    error_detail = response.json()
+                    error_msg += f"Details: {error_detail}"
+                except:
+                    error_msg += f"Response: {response.text}"
+                
+                print(f"❌ Gemini API error: {error_msg}")
+                await update.message.reply_text(error_msg[:1000])  # Truncate long errors
+                
+        except requests.exceptions.Timeout:
+            await update.message.reply_text("⏰ Request timeout! Try with a smaller PDF.")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {str(e)}")
+            error_msg = f"❌ Processing error: {str(e)}"
+            print(f"❌ Error: {error_msg}")
+            await update.message.reply_text(error_msg)
         finally:
+            # Cleanup
             try:
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
                 if user_id in user_data:
                     del user_data[user_id]
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ Cleanup error: {e}")
 
     # Setup handlers for v20
     app.add_handler(CommandHandler("start", start))
@@ -126,7 +176,7 @@ if BOT_VERSION == "v20":
     app.add_handler(CommandHandler("doneocr", process_ocr))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-# Handlers for v13
+# Handlers for v13 (similar fixes needed)
 else:
     updater = Updater(token=BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
@@ -184,38 +234,85 @@ else:
             with open(pdf_path, "rb") as f:
                 pdf_data = base64.b64encode(f.read()).decode("utf-8")
             
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+            # FIXED Gemini API URL for v13
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            
             payload = {
                 "contents": [{
                     "parts": [
-                        {"inlineData": {"mimeType": "application/pdf", "data": pdf_data}},
-                        {"text": "Create 5 MCQs from PDF. Format: 1. Question? (a) opt1 (b) opt2 (c) opt3 ✅ (d) opt4 Ex: explanation"}
+                        {
+                            "inlineData": {
+                                "mimeType": "application/pdf",
+                                "data": pdf_data
+                            }
+                        },
+                        {
+                            "text": (
+                                "Extract text from this PDF and create 5 multiple choice questions. "
+                                "Format each question as:\n\n"
+                                "1. Question text?\n"
+                                "(a) Option 1\n"
+                                "(b) Option 2\n"
+                                "(c) Option 3 ✅\n"
+                                "(d) Option 4\n"
+                                "Ex: Brief explanation\n\n"
+                                "Make sure questions are based ONLY on the PDF content. "
+                                "Mark the correct answer with ✅."
+                            )
+                        }
                     ]
                 }]
             }
             
-            response = requests.post(url, json=payload, timeout=30)
+            print(f"📤 Sending request to Gemini API...")
+            response = requests.post(url, json=payload, timeout=60)
+            print(f"📥 Response status: {response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                if len(text) > 4000:
-                    text = text[:4000] + "..."
-                update.message.reply_text(f"📝 MCQs:\n\n{text}")
-                update.message.reply_text("✅ Done!")
-            else:
-                update.message.reply_text(f"❌ API Error: {response.status_code}")
+                print("✅ Gemini API success")
                 
+                text = ""
+                try:
+                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError) as e:
+                    print(f"❌ Error parsing response: {e}")
+                    update.message.reply_text("❌ Failed to parse AI response")
+                    return
+                
+                if text:
+                    if len(text) > 4000:
+                        text = text[:4000] + "...\n\n(Output truncated)"
+                    update.message.reply_text(f"📝 **Generated MCQs:**\n\n{text}")
+                    update.message.reply_text("✅ Processing Complete!")
+                else:
+                    update.message.reply_text("❌ No content generated from PDF")
+                    
+            else:
+                error_msg = f"❌ API Error: {response.status_code}\n"
+                try:
+                    error_detail = response.json()
+                    error_msg += f"Details: {error_detail}"
+                except:
+                    error_msg += f"Response: {response.text}"
+                
+                print(f"❌ Gemini API error: {error_msg}")
+                update.message.reply_text(error_msg[:1000])
+                
+        except requests.exceptions.Timeout:
+            update.message.reply_text("⏰ Request timeout! Try with a smaller PDF.")
         except Exception as e:
-            update.message.reply_text(f"❌ Error: {str(e)}")
+            error_msg = f"❌ Processing error: {str(e)}"
+            print(f"❌ Error: {error_msg}")
+            update.message.reply_text(error_msg)
         finally:
             try:
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
                 if user_id in user_data:
                     del user_data[user_id]
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ Cleanup error: {e}")
 
     # Setup handlers for v13
     dispatcher.add_handler(CommandHandler("start", start))
@@ -252,7 +349,7 @@ def run_bot():
                 updater.start_polling(drop_pending_updates=True)
                 updater.idle()
                 
-            break  # If successful, break the loop
+            break
             
         except Exception as e:
             print(f"❌ Bot startup failed (attempt {attempt + 1}): {e}")
@@ -260,7 +357,7 @@ def run_bot():
             if "Conflict" in str(e) and attempt < max_retries - 1:
                 print(f"🔄 Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
+                retry_delay *= 2
             else:
                 print("❌ Max retries reached. Bot failed to start.")
                 break
