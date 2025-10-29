@@ -23,8 +23,8 @@ except ImportError:
         print("✅ Using python-telegram-bot v13.x")
         BOT_VERSION = "v13"
     except ImportError as e:
-    print(f"❌ Import failed: {e}")
-    exit(1)
+        print(f"❌ Import failed: {e}")
+        exit(1)
 
 # Store user data
 user_data = {}
