@@ -10,10 +10,17 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Initialize bot
-app = Application.builder().token(BOT_TOKEN).build()
+print("🤖 Initializing OCR Bot...")
 
-# Store user sessions (in-memory, will reset on redeploy)
+# Initialize bot
+try:
+    app = Application.builder().token(BOT_TOKEN).build()
+    print("✅ Bot application created successfully")
+except Exception as e:
+    print(f"❌ Bot creation failed: {e}")
+    exit(1)
+
+# Store user sessions
 user_sessions = {}
 
 # ===== BOT HANDLERS =====
@@ -21,7 +28,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **OCR MCQ Bot**\n\n"
         "Send /ocr to start → Upload PDF → /doneocr to generate questions!\n"
-        "Max PDF size: 3MB | Processing time: ~30 seconds",
+        "Max PDF size: 3MB",
         parse_mode="Markdown"
     )
 
@@ -67,10 +74,9 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ **PDF Received!**\n\n"
-            f"File: `{document.file_name}`\n"
+            f"File: {document.file_name}\n"
             f"Size: {document.file_size/1024/1024:.1f}MB\n\n"
-            f"Now send /doneocr to generate MCQs!",
-            parse_mode="Markdown"
+            f"Now send /doneocr to generate MCQs!"
         )
         
     except Exception as e:
@@ -105,7 +111,7 @@ async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     },
                     {
                         "text": (
-                            "Extract text from this PDF and generate 8 multiple choice questions. "
+                            "Extract text from this PDF and generate 5 multiple choice questions. "
                             "Format each as:\n\n"
                             "1. Question?\n"
                             "(a) Option1\n(b) Option2\n(c) Option3 ✅\n(d) Option4\n"
@@ -121,7 +127,7 @@ async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
                 json=payload,
-                timeout=30
+                timeout=25
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -137,17 +143,8 @@ async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if len(text_response) <= 4000:
                             await update.message.reply_text(f"📚 **Generated MCQs:**\n\n{text_response}")
                         else:
-                            # Send as file if too large
-                            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-                                f.write(text_response)
-                                f.flash()
-                            
-                            await update.message.reply_document(
-                                document=open(f.name, "rb"),
-                                filename="mcqs.txt",
-                                caption="✅ Generated MCQs"
-                            )
-                            os.unlink(f.name)
+                            # Send first part as message
+                            await update.message.reply_text(f"📚 **Generated MCQs:**\n\n{text_response[:4000]}...")
                             
                         await update.message.reply_text("✅ **Processing Complete!**")
                     else:
@@ -188,15 +185,20 @@ def health():
     return "✅ Healthy"
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=5000, debug=False)
+    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
-# ===== START BOTH =====
+# ===== START BOT =====
+async def main():
+    print("🚀 Starting OCR Bot Polling...")
+    await app.run_polling()
+
 if __name__ == "__main__":
     import threading
     
     # Start Flask in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
+    print("🌐 Flask server started on port 5000")
     
-    print("🤖 Starting OCR Bot...")
-    app.run_polling()
+    # Start bot
+    asyncio.run(main())
