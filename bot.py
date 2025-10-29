@@ -4,7 +4,7 @@ import tempfile
 import base64
 from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # Config
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -12,28 +12,28 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 print("🚀 Starting OCR Bot...")
 
-# Initialize bot
-app = Application.builder().token(BOT_TOKEN).build()
+# Initialize bot (using older stable version)
+updater = Updater(token=BOT_TOKEN, use_context=True)
+dispatcher = updater.dispatcher
 
 # Store user data
 user_data = {}
 
 # Handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 **OCR MCQ Bot**\n\n"
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "🤖 OCR MCQ Bot\n\n"
         "Commands:\n"
         "/ocr - Start OCR session\n" 
-        "/doneocr - Process PDF\n"
-        "/status - Check bot status"
+        "/doneocr - Process PDF"
     )
 
-async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def ocr_start(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     user_data[user_id] = {"step": "waiting_pdf"}
-    await update.message.reply_text("📄 Please send me a PDF file (max 2MB)")
+    update.message.reply_text("📄 Please send me a PDF file (max 2MB)")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_document(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     
     if user_id not in user_data:
@@ -42,17 +42,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     
     if document.mime_type != "application/pdf":
-        await update.message.reply_text("❌ Please send a PDF file")
+        update.message.reply_text("❌ Please send a PDF file")
         return
         
     if document.file_size > 2 * 1024 * 1024:
-        await update.message.reply_text("❌ File too large! Max 2MB")
+        update.message.reply_text("❌ File too large! Max 2MB")
         return
         
     try:
-        file = await document.get_file()
+        file = document.get_file()
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        await file.download_to_drive(temp_file.name)
+        file.download(temp_file.name)
         
         user_data[user_id] = {
             "step": "has_pdf",
@@ -60,25 +60,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "file_name": document.file_name
         }
         
-        await update.message.reply_text(
+        update.message.reply_text(
             f"✅ PDF received: {document.file_name}\n"
             f"Send /doneocr to generate MCQs"
         )
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        update.message.reply_text(f"❌ Error: {str(e)}")
 
-async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def process_ocr(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     
     if user_id not in user_data or user_data[user_id]["step"] != "has_pdf":
-        await update.message.reply_text("❌ No PDF found. Send /ocr first")
+        update.message.reply_text("❌ No PDF found. Send /ocr first")
         return
         
     pdf_info = user_data[user_id]
     pdf_path = pdf_info["pdf_path"]
     
-    await update.message.reply_text("🔄 Processing PDF...")
+    update.message.reply_text("🔄 Processing PDF...")
     
     try:
         # Read and encode PDF
@@ -113,13 +113,13 @@ async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(text) > 4000:
                 text = text[:4000] + "...\n\n(Output truncated)"
                 
-            await update.message.reply_text(f"📝 **MCQs Generated:**\n\n{text}")
-            await update.message.reply_text("✅ Done!")
+            update.message.reply_text(f"📝 MCQs Generated:\n\n{text}")
+            update.message.reply_text("✅ Done!")
         else:
-            await update.message.reply_text(f"❌ API Error: {response.status_code}")
+            update.message.reply_text(f"❌ API Error: {response.status_code}")
             
     except Exception as e:
-        await update.message.reply_text(f"❌ Processing error: {str(e)}")
+        update.message.reply_text(f"❌ Processing error: {str(e)}")
     finally:
         # Cleanup
         try:
@@ -130,15 +130,11 @@ async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot is running!")
-
 # Setup handlers
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("ocr", ocr_start))
-app.add_handler(CommandHandler("doneocr", process_ocr))
-app.add_handler(CommandHandler("status", status))
-app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("ocr", ocr_start))
+dispatcher.add_handler(CommandHandler("doneocr", process_ocr))
+dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
 
 # Flask app for uptime
 flask_app = Flask(__name__)
@@ -165,4 +161,5 @@ if __name__ == "__main__":
     
     # Start bot
     print("🤖 Starting Telegram Bot...")
-    app.run_polling()
+    updater.start_polling()
+    updater.idle()
