@@ -2,6 +2,7 @@ import os
 import requests
 import tempfile
 import base64
+import time
 from flask import Flask
 
 # Config
@@ -236,6 +237,34 @@ def health():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, debug=False)
 
+def run_bot():
+    """Run bot with conflict handling"""
+    max_retries = 3
+    retry_delay = 10
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"🤖 Starting Telegram Bot (attempt {attempt + 1})...")
+            
+            if BOT_VERSION == "v20":
+                app.run_polling(drop_pending_updates=True)
+            else:
+                updater.start_polling(drop_pending_updates=True)
+                updater.idle()
+                
+            break  # If successful, break the loop
+            
+        except Exception as e:
+            print(f"❌ Bot startup failed (attempt {attempt + 1}): {e}")
+            
+            if "Conflict" in str(e) and attempt < max_retries - 1:
+                print(f"🔄 Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print("❌ Max retries reached. Bot failed to start.")
+                break
+
 if __name__ == "__main__":
     import threading
     
@@ -245,10 +274,5 @@ if __name__ == "__main__":
     flask_thread.start()
     print("🌐 Flask started on port 5000")
     
-    # Start bot
-    print("🤖 Starting Telegram Bot...")
-    if BOT_VERSION == "v20":
-        app.run_polling()
-    else:
-        updater.start_polling()
-        updater.idle()
+    # Start bot with retry logic
+    run_bot()
