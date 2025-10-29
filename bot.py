@@ -7,7 +7,7 @@ from flask import Flask
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -28,7 +28,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ OCR MCQ Bot is running fine!"
+    return "✅ OCR MCQ Bot is running (Flask OK)."
 
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
@@ -36,15 +36,15 @@ def run_flask():
 # === TELEGRAM BOT HANDLERS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Hi! I'm your OCR MCQ Bot.\n\nSend /ocr to start OCR session."
+        "👋 Hi! I'm your OCR → MCQ bot.\nSend /ocr to start an OCR session."
     )
 
 async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["ocr_pdf"] = None
     await update.message.reply_text(
         f"📄 OCR session started!\n\n"
-        f"Please send a single PDF file (max {MAX_PDF_SIZE_MB} MB).\n"
-        f"After uploading, send /doneocr to process it."
+        f"Please send one PDF file (max {MAX_PDF_SIZE_MB} MB),\n"
+        f"then send /doneocr to process."
     )
 
 async def collect_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -54,11 +54,11 @@ async def collect_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file = msg.document
     if not file.file_name.lower().endswith(".pdf"):
-        await msg.reply_text("❌ Only PDF files are accepted.")
+        await msg.reply_text("❌ Please send a PDF only.")
         return
 
     if file.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
-        await msg.reply_text(f"❌ File too large. Max {MAX_PDF_SIZE_MB} MB allowed.")
+        await msg.reply_text(f"❌ File too large (max {MAX_PDF_SIZE_MB} MB).")
         return
 
     file_obj = await file.get_file()
@@ -66,7 +66,7 @@ async def collect_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["ocr_pdf"] = file_path
 
     await msg.reply_text(
-        f"✅ PDF received: `{file.file_name}`\nNow send /doneocr to generate questions.",
+        f"✅ Received `{file.file_name}`\nNow send /doneocr to generate MCQs.",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -78,10 +78,10 @@ def stream_b64_encode(path: str):
 async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pdf_path = context.user_data.get("ocr_pdf")
     if not pdf_path or not os.path.exists(pdf_path):
-        await update.message.reply_text("⚠️ No PDF found. Use /ocr and upload one first.")
+        await update.message.reply_text("⚠️ No PDF uploaded. Use /ocr first.")
         return
 
-    await update.message.reply_text("🧠 Processing your PDF... please wait ⏳")
+    await update.message.reply_text("🧠 Processing your PDF... Please wait ⏳")
 
     try:
         data_b64 = "".join(stream_b64_encode(pdf_path))
@@ -92,25 +92,16 @@ async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payload = {
         "contents": [{
             "parts": [
-                {
-                    "inlineData": {
-                        "mimeType": "application/pdf",
-                        "data": data_b64
-                    }
-                },
-                {
-                    "text": (
-                        "Read and extract all text content from this PDF. "
-                        "Then generate exactly 20 multiple-choice questions (MCQs) in English "
-                        "based ONLY on the extracted text.\n\n"
-                        "Format requirements:\n"
-                        "- Numbered questions (1., 2., ...)\n"
-                        "- Options labeled (a), (b), (c), (d)\n"
-                        "- Mark the correct option with a ✅\n"
-                        "- Add 'Ex:' explanation line after each question.\n"
-                        "- Output inside a single code block."
-                    )
-                }
+                {"inlineData": {"mimeType": "application/pdf", "data": data_b64}},
+                {"text": (
+                    "Extract text from this PDF and generate exactly 20 MCQs in English. "
+                    "Format:\n"
+                    "- Questions numbered 1., 2., …\n"
+                    "- Options (a) (b) (c) (d)\n"
+                    "- ✅ mark the correct one\n"
+                    "- Add 'Ex:' explanation line\n"
+                    "- Output inside a single code block."
+                )}
             ]
         }]
     }
@@ -130,13 +121,11 @@ async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             .get("text", "")
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Gemini API failed: {e}")
+        await update.message.reply_text(f"❌ Gemini API error: {e}")
         return
     finally:
-        try:
-            os.remove(pdf_path)
-        except:
-            pass
+        try: os.remove(pdf_path)
+        except: pass
         context.user_data.pop("ocr_pdf", None)
 
     if not text:
@@ -144,31 +133,28 @@ async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     txt_path = f"ocr_mcq_{int(time.time())}.txt"
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    with open(txt_path, "w", encoding="utf-8") as f: f.write(text)
 
     try:
         await update.message.reply_document(
             document=open(txt_path, "rb"),
-            caption="✅ Generated MCQs from PDF",
+            caption="✅ Generated MCQs from PDF"
         )
     except Exception as e:
-        await update.message.reply_text(f"✅ Generated MCQs but failed to send file: {e}")
+        await update.message.reply_text(f"✅ File ready but send failed: {e}")
     finally:
-        try:
-            os.remove(txt_path)
-        except:
-            pass
+        try: os.remove(txt_path)
+        except: pass
 
-# === MAIN BOT RUN ===
+# === MAIN RUN ===
 def run_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ocr", ocr_command))
-    app.add_handler(MessageHandler(filters.Document.ALL, collect_pdf))
-    app.add_handler(CommandHandler("doneocr", doneocr))
-    print("✅ Telegram OCR MCQ Bot is running...")
-    app.run_polling()
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("ocr", ocr_command))
+    application.add_handler(MessageHandler(filters.Document.ALL, collect_pdf))
+    application.add_handler(CommandHandler("doneocr", doneocr))
+    print("✅ Telegram OCR Bot running (PTB 21)...")
+    application.run_polling()
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
