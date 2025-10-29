@@ -1,8 +1,8 @@
 import os
-import asyncio
-import aiohttp
+import requests
 import tempfile
 import base64
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -10,96 +10,84 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-print("🤖 Initializing OCR Bot...")
+print("🚀 Starting OCR Bot...")
 
 # Initialize bot
-try:
-    app = Application.builder().token(BOT_TOKEN).build()
-    print("✅ Bot application created successfully")
-except Exception as e:
-    print(f"❌ Bot creation failed: {e}")
-    exit(1)
+app = Application.builder().token(BOT_TOKEN).build()
 
-# Store user sessions
-user_sessions = {}
+# Store user data
+user_data = {}
 
-# ===== BOT HANDLERS =====
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **OCR MCQ Bot**\n\n"
-        "Send /ocr to start → Upload PDF → /doneocr to generate questions!\n"
-        "Max PDF size: 3MB",
-        parse_mode="Markdown"
+        "Commands:\n"
+        "/ocr - Start OCR session\n" 
+        "/doneocr - Process PDF\n"
+        "/status - Check bot status"
     )
 
 async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_sessions[user_id] = {"step": "waiting_pdf"}
-    
-    await update.message.reply_text(
-        "📄 **OCR Session Started**\n\n"
-        "Please send me a PDF file (max 3MB).\n"
-        "After uploading, send /doneocr to generate MCQs.",
-        parse_mode="Markdown"
-    )
+    user_data[user_id] = {"step": "waiting_pdf"}
+    await update.message.reply_text("📄 Please send me a PDF file (max 2MB)")
 
-async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if user_id not in user_sessions or user_sessions[user_id]["step"] != "waiting_pdf":
+    if user_id not in user_data:
         return
-    
+        
     document = update.message.document
     
-    # Check if PDF
-    if not document.mime_type == "application/pdf":
-        await update.message.reply_text("❌ Please send a PDF file.")
+    if document.mime_type != "application/pdf":
+        await update.message.reply_text("❌ Please send a PDF file")
         return
-    
-    # Check file size (3MB max)
-    if document.file_size > 3 * 1024 * 1024:
-        await update.message.reply_text("❌ File too large! Max 3MB allowed.")
+        
+    if document.file_size > 2 * 1024 * 1024:
+        await update.message.reply_text("❌ File too large! Max 2MB")
         return
-    
+        
     try:
-        # Download file
         file = await document.get_file()
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
-            await file.download_to_drive(tmp_file.name)
-            user_sessions[user_id] = {
-                "step": "pdf_received", 
-                "pdf_path": tmp_file.name,
-                "pdf_name": document.file_name
-            }
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        await file.download_to_drive(temp_file.name)
+        
+        user_data[user_id] = {
+            "step": "has_pdf",
+            "pdf_path": temp_file.name,
+            "file_name": document.file_name
+        }
         
         await update.message.reply_text(
-            f"✅ **PDF Received!**\n\n"
-            f"File: {document.file_name}\n"
-            f"Size: {document.file_size/1024/1024:.1f}MB\n\n"
-            f"Now send /doneocr to generate MCQs!"
+            f"✅ PDF received: {document.file_name}\n"
+            f"Send /doneocr to generate MCQs"
         )
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error downloading file: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if user_id not in user_sessions or user_sessions[user_id]["step"] != "pdf_received":
-        await update.message.reply_text("❌ No PDF found. Send /ocr first.")
+    if user_id not in user_data or user_data[user_id]["step"] != "has_pdf":
+        await update.message.reply_text("❌ No PDF found. Send /ocr first")
         return
+        
+    pdf_info = user_data[user_id]
+    pdf_path = pdf_info["pdf_path"]
     
-    session = user_sessions[user_id]
-    pdf_path = session["pdf_path"]
-    
-    await update.message.reply_text("🔄 **Processing PDF...**\n\nThis may take 20-30 seconds...")
+    await update.message.reply_text("🔄 Processing PDF...")
     
     try:
-        # Read PDF and encode
+        # Read and encode PDF
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
-        # Call Gemini API
+        # Gemini API call
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+        
         payload = {
             "contents": [{
                 "parts": [
@@ -110,95 +98,71 @@ async def process_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         }
                     },
                     {
-                        "text": (
-                            "Extract text from this PDF and generate 5 multiple choice questions. "
-                            "Format each as:\n\n"
-                            "1. Question?\n"
-                            "(a) Option1\n(b) Option2\n(c) Option3 ✅\n(d) Option4\n"
-                            "Ex: Brief explanation\n\n"
-                            "Base questions ONLY on the PDF content. Mark correct answers with ✅."
-                        )
+                        "text": "Extract text and create 5 multiple choice questions with answers. Format: 1. Question? (a) opt1 (b) opt2 (c) opt3 ✅ (d) opt4 Ex: explanation"
                     }
                 ]
             }]
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-                json=payload,
-                timeout=25
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    text_response = (
-                        result.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text", "")
-                    )
-                    
-                    if text_response:
-                        # Send as message (truncate if too long)
-                        if len(text_response) <= 4000:
-                            await update.message.reply_text(f"📚 **Generated MCQs:**\n\n{text_response}")
-                        else:
-                            # Send first part as message
-                            await update.message.reply_text(f"📚 **Generated MCQs:**\n\n{text_response[:4000]}...")
-                            
-                        await update.message.reply_text("✅ **Processing Complete!**")
-                    else:
-                        await update.message.reply_text("❌ No response from AI. Try again.")
-                
-                else:
-                    await update.message.reply_text(f"❌ API Error: {response.status}")
+        response = requests.post(url, json=payload, timeout=30)
         
-    except asyncio.TimeoutError:
-        await update.message.reply_text("⏰ Processing timeout! Try with a smaller PDF.")
+        if response.status_code == 200:
+            data = response.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            
+            if len(text) > 4000:
+                text = text[:4000] + "...\n\n(Output truncated)"
+                
+            await update.message.reply_text(f"📝 **MCQs Generated:**\n\n{text}")
+            await update.message.reply_text("✅ Done!")
+        else:
+            await update.message.reply_text(f"❌ API Error: {response.status_code}")
+            
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ Processing error: {str(e)}")
     finally:
         # Cleanup
         try:
             if os.path.exists(pdf_path):
-                os.unlink(pdf_path)
-            user_sessions.pop(user_id, None)
+                os.remove(pdf_path)
+            if user_id in user_data:
+                del user_data[user_id]
         except:
             pass
 
-# ===== SETUP HANDLERS =====
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot is running!")
+
+# Setup handlers
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("ocr", ocr_start))
 app.add_handler(CommandHandler("doneocr", process_ocr))
-app.add_handler(MessageHandler(filters.Document.ALL, handle_pdf))
+app.add_handler(CommandHandler("status", status))
+app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-# ===== FLASK APP FOR UPTIME =====
-from flask import Flask
+# Flask app for uptime
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "🤖 OCR Bot is running!"
+    return "🤖 OCR Bot Running"
 
 @flask_app.route('/health')
 def health():
-    return "✅ Healthy"
+    return "✅ OK"
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
-
-# ===== START BOT =====
-async def main():
-    print("🚀 Starting OCR Bot Polling...")
-    await app.run_polling()
+    flask_app.run(host='0.0.0.0', port=5000, debug=False)
 
 if __name__ == "__main__":
     import threading
     
-    # Start Flask in background thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    # Start Flask
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
     flask_thread.start()
-    print("🌐 Flask server started on port 5000")
+    print("🌐 Flask started on port 5000")
     
     # Start bot
-    asyncio.run(main())
+    print("🤖 Starting Telegram Bot...")
+    app.run_polling()
