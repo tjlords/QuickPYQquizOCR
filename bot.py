@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Final Render-Ready QuickPYQ OCR Bot
-
 import os
 import io
 import json
@@ -11,7 +9,6 @@ import asyncio
 import fitz  # PyMuPDF
 import requests
 from pathlib import Path
-from typing import List
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -25,15 +22,14 @@ from telegram.error import NetworkError, TimedOut
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PORT = int(os.getenv("PORT", 10000))
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/{BOT_TOKEN}" if RENDER_EXTERNAL_HOSTNAME else os.getenv("WEBHOOK_URL")
 
 MAX_PDF_SIZE_MB = 25
 PAGES_PER_CHUNK = 5
-USER_DIR = Path("user_data")
-USER_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path("user_data")
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Gemini fallback models
 GEMINI_MODELS = [
@@ -49,19 +45,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # ---------------- Utilities ----------------
 def user_dir(uid: int) -> Path:
-    d = USER_DIR / str(uid)
+    d = OUTPUT_DIR / str(uid)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 def state_file(uid: int) -> Path:
     return user_dir(uid) / "progress.json"
 
+def save_state(uid: int, state: dict):
+    state_file(uid).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
 def load_state(uid: int) -> dict:
     f = state_file(uid)
     return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
-def save_state(uid: int, state: dict):
-    state_file(uid).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+def append_output(uid: int, filename: str, text: str):
+    out_path = user_dir(uid) / f"{Path(filename).stem}_MCQ.txt"
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write(text + "\n\n")
+    return out_path
 
 def stream_b64_encode(path: Path):
     with open(path, "rb") as f:
@@ -109,31 +111,19 @@ async def safe_send_file(update: Update, path: Path, caption=""):
         except (TimedOut, NetworkError):
             await asyncio.sleep(2)
 
-# ---------------- Owner check ----------------
-def owner_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != OWNER_ID:
-            await safe_send(update, "⚠️ This bot is restricted to the owner only.")
-            return
-        return await func(update, context)
-    return wrapper
-
 # ---------------- Commands ----------------
-@owner_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send(update,
-        "👋 *QuickPYQ OCR Super Bot Ready!*\n\n"
+        "👋 *QuickPYQ OCR Bot Ready!*\n\n"
         "Commands:\n"
-        "/setlang Gujarati|Hindi|English — set preferred output language.\n"
-        "/ocr — start OCR session (upload PDFs/images).\n"
+        "/setlang Gujarati|Hindi|English — set your preferred output language.\n"
+        "/ocr — start OCR session (upload PDFs or images, multiple allowed).\n"
         "/doneocr — process all uploaded files.\n"
-        "/resumeocr — continue unfinished work.\n"
-        "/saved — send saved MCQ files.\n"
-        "/cleanup — delete saved MCQs.\n"
-        "/status — show progress.\n",
+        "/resumeocr — continue from where it left off.\n"
+        "/saved — show your processed MCQ files.\n"
+        "/cleanup — delete all stored files.\n",
     )
 
-@owner_only
 async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(maxsplit=1)
     if len(args) != 2 or args[1].capitalize() not in ("Gujarati", "Hindi", "English"):
@@ -143,12 +133,10 @@ async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["lang"] = lang
     await safe_send(update, f"✅ Language set to {lang}")
 
-@owner_only
 async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["uploads"] = []
     await safe_send(update, "📄 OCR session started. Upload PDF or image files now. When done, send /doneocr.")
 
-@owner_only
 async def collect_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
@@ -181,51 +169,30 @@ def gemini_payload(path: Path, lang: str):
             "parts": [
                 {"inlineData": {"mimeType": mime, "data": data}},
                 {"text": (
-                    f"Extract all text and generate exam-style MCQs in {lang}. "
-                    "Each question should have (a)–(d) options, mark the correct one with ✅, and add an explanation line starting with 'Ex:'. "
-                    "Output everything cleanly in one block."
+                    f"Extract all text and generate maximum high-quality multiple-choice questions in {lang}. "
+                    "Each question must have options (a)–(d), mark correct with ✅, and add explanation starting with 'Ex:'. "
+                    "Focus on competitive exam standard clarity. Output inside a single code block."
                 )}
             ]
         }]
     }
 
 async def process_file(update: Update, uid: int, path: Path, lang: str):
-    out_path = user_dir(uid) / f"{path.stem}_MCQ.txt"
-    if path.suffix.lower() == ".pdf":
-        doc = fitz.open(str(path))
-        total = doc.page_count
-        for start in range(0, total, PAGES_PER_CHUNK):
-            end = min(start + PAGES_PER_CHUNK, total)
-            chunk = fitz.open()
-            for p in range(start, end):
-                chunk.insert_pdf(doc, from_page=p, to_page=p)
-            chunk_path = user_dir(uid) / f"{path.stem}_chunk_{start}-{end}.pdf"
-            chunk.save(str(chunk_path))
-            chunk.close()
+    if path.stat().st_size == 0:
+        await safe_send(update, f"❌ Error {path.name}: File must be non-empty.")
+        return False
 
-            text = call_gemini(gemini_payload(chunk_path, lang))
-            if text:
-                with open(out_path, "a", encoding="utf-8") as f:
-                    f.write(text + "\n\n")
-            else:
-                await safe_send(update, f"⚠️ Gemini timeout on {path.name} ({start}-{end}).")
-                return False
-            chunk_path.unlink(missing_ok=True)
-        doc.close()
+    text = call_gemini(gemini_payload(path, lang))
+    if text:
+        out_path = append_output(uid, path.name, text)
+        await safe_send_file(update, out_path, caption=f"✅ MCQs generated for {path.name}")
+        path.unlink(missing_ok=True)
+        out_path.unlink(missing_ok=True)
+        return True
     else:
-        text = call_gemini(gemini_payload(path, lang))
-        if text:
-            with open(out_path, "a", encoding="utf-8") as f:
-                f.write(text + "\n\n")
-        else:
-            await safe_send(update, f"⚠️ Gemini failed on {path.name}.")
-            return False
+        await safe_send(update, f"⚠️ Gemini failed on {path.name}. Use /resumeocr to retry.")
+        return False
 
-    await safe_send_file(update, out_path, caption=f"✅ MCQs for {path.name}")
-    path.unlink(missing_ok=True)
-    return True
-
-@owner_only
 async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     files = context.user_data.get("uploads", [])
@@ -234,49 +201,46 @@ async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lang = context.user_data.get("lang", "English")
-    await safe_send(update, f"🧠 Processing {len(files)} files in {lang}...")
+    await safe_send(update, f"🧠 Processing {len(files)} file(s) in {lang}...")
 
     for f in files:
         path = Path(f)
-        ok = await process_file(update, uid, path, lang)
-        if not ok:
-            return
+        await process_file(update, uid, path, lang)
 
-    await safe_send(update, "✅ All files processed successfully.")
+    await safe_send(update, "✅ All files processed successfully!")
 
-@owner_only
-async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    for f in user_dir(uid).glob("*_MCQ.txt"):
-        f.unlink(missing_ok=True)
-    await safe_send(update, "🧹 Cleanup complete.")
-
-@owner_only
-async def saved(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    files = list(user_dir(uid).glob("*_MCQ.txt"))
-    if not files:
-        await safe_send(update, "No saved files.")
-        return
-    for f in files:
-        await safe_send_file(update, f, caption=f.name)
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("Error:", exc_info=context.error)
+    try:
+        if update and update.effective_message:
+            await safe_send(update, "⚠️ Internal error occurred. Try /resumeocr.")
+    except Exception:
+        pass
 
 # ---------------- MAIN ----------------
 def main():
-    if not BOT_TOKEN or not GEMINI_API_KEY or not WEBHOOK_URL or OWNER_ID == 0:
-        raise SystemExit("Missing required environment variables.")
+    if not BOT_TOKEN or not GEMINI_API_KEY or not WEBHOOK_URL:
+        raise SystemExit("Missing BOT_TOKEN, GEMINI_API_KEY or WEBHOOK_URL")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setlang", setlang))
     app.add_handler(CommandHandler("ocr", ocr_start))
     app.add_handler(CommandHandler("doneocr", doneocr))
-    app.add_handler(CommandHandler("cleanup", cleanup))
-    app.add_handler(CommandHandler("saved", saved))
+    app.add_handler(CommandHandler("resumeocr", doneocr))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, collect_file))
+    app.add_error_handler(error_handler)
 
-    logging.info(f"Setting webhook to {WEBHOOK_URL}")
-    app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
+    async def run():
+        await app.bot.set_webhook(url=WEBHOOK_URL)
+        logging.info(f"Webhook set to {WEBHOOK_URL}")
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+        )
+
+    asyncio.run(run())
 
 if __name__ == "__main__":
     main()
