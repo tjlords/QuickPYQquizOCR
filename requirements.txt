@@ -2,3 +2,4 @@ python-telegram-bot[webhooks]==21.10
 requests
 PyMuPDF
 langdetect
+Flask==2.3.3
