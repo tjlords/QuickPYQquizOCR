@@ -7,13 +7,12 @@ from telegram.ext import (
     filters, ContextTypes
 )
 from telegram.error import TimedOut, NetworkError
-from langdetect import detect
 
-# ------------------ CONFIG ------------------
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "YOUR_GEMINI_API_KEY"
-MAX_PDF_SIZE_MB = 5
 PORT = int(os.getenv("PORT", 10000))
+MAX_PDF_SIZE_MB = 5
 
 # Gemini fallback models
 GEMINI_MODELS = [
@@ -24,50 +23,24 @@ GEMINI_MODELS = [
     "gemini-flash-latest"
 ]
 
-# Flask keepalive for Render
+# Flask keep-alive
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "✅ QuickPYQ OCR Gemini Bot is running!"
+    return "✅ OCR Gemini Bot running."
 
-# ------------------ LOGGING ------------------
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# Logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ------------------ UTILITIES ------------------
+# ---------------- HELPERS ----------------
 def stream_b64_encode(path: str):
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(57_600), b""):
             yield base64.b64encode(chunk).decode("utf-8")
 
-def detect_language_from_pdf(file_path: str):
-    """Detect document language from first 300 chars of decoded PDF bytes."""
-    try:
-        import fitz  # PyMuPDF for better detection if available
-        text = ""
-        with fitz.open(file_path) as doc:
-            for page in doc:
-                text += page.get_text()
-                if len(text) > 300:
-                    break
-    except Exception:
-        # fallback to reading bytes directly
-        try:
-            text = open(file_path, "rb").read(300).decode("latin1", errors="ignore")
-        except:
-            text = ""
-    try:
-        code = detect(text)
-        mapping = {"gu": "Gujarati", "hi": "Hindi", "en": "English"}
-        return mapping.get(code, "English")
-    except Exception:
-        return "English"
-
 def call_gemini_api(data_b64: str, language: str) -> str | None:
-    """Try Gemini models sequentially with retries."""
+    """Send PDF to Gemini, retry with fallback models."""
     mime_type = "application/pdf"
     count = 20
 
@@ -76,14 +49,14 @@ def call_gemini_api(data_b64: str, language: str) -> str | None:
             "parts": [
                 {"inlineData": {"mimeType": mime_type, "data": data_b64}},
                 {"text": (
-                    f"Extract ALL text from this PDF and generate exactly {count} "
-                    f"multiple-choice questions in {language} language. "
-                    f"Do not translate — keep the same language and script. "
-                    f"Follow this format:\n"
+                    f"Extract all text from this PDF and generate exactly {count} "
+                    f"multiple-choice questions in {language}. "
+                    f"Do NOT translate or switch languages. "
+                    f"Each question should follow this structure:\n"
                     f"1. Question text\n"
                     f"(a) Option A\n(b) Option B\n(c) Option C\n(d) Option D\n"
-                    f"Mark correct one with ✅\n"
-                    f"Add 'Ex:' line explaining answer in {language}."
+                    f"Mark the correct one with ✅\n"
+                    f"Add an 'Ex:' line explaining the answer in {language}."
                 )}
             ]
         }]
@@ -114,11 +87,10 @@ def call_gemini_api(data_b64: str, language: str) -> str | None:
             except Exception as e:
                 logging.warning(f"{model} failed: {e}")
                 time.sleep(2)
-                continue
     return None
 
 async def safe_reply(update, text, file_path=None):
-    """Send reply or document with retry."""
+    """Safe Telegram reply with retry."""
     for attempt in range(3):
         try:
             if file_path:
@@ -131,47 +103,59 @@ async def safe_reply(update, text, file_path=None):
             await asyncio.sleep(2)
     logging.error("Failed to send message after retries.")
 
-# ------------------ COMMAND HANDLERS ------------------
+# ---------------- BOT HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_reply(update, "👋 Send /ocr to start OCR MCQ generation from PDF.")
+    await safe_reply(update,
+        "👋 Welcome to QuickPYQ OCR Bot!\n"
+        "Use /setlang to choose your question language (Gujarati, Hindi, English).\n"
+        "Then send /ocr to begin."
+    )
+
+async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.split()
+    if len(msg) == 2:
+        lang = msg[1].capitalize()
+        if lang in ["Gujarati", "Hindi", "English"]:
+            context.user_data["lang"] = lang
+            await safe_reply(update, f"✅ Language set to {lang}.")
+            return
+    await safe_reply(update, "❌ Use correctly: `/setlang Gujarati` or `/setlang Hindi` or `/setlang English`",)
 
 async def ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = context.user_data.get("lang")
+    if not lang:
+        await safe_reply(update, "⚠️ Please set your language first using /setlang")
+        return
     context.user_data["ocr_pdf"] = None
-    await safe_reply(update, f"📄 OCR session started!\nSend a single PDF (≤ {MAX_PDF_SIZE_MB} MB), then /doneocr.")
+    await safe_reply(update, f"📄 OCR started in {lang}.\nSend a single PDF (≤ {MAX_PDF_SIZE_MB} MB), then /doneocr.")
 
 async def collect_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg.document:
         return
-
     file = msg.document
     if not file.file_name.lower().endswith(".pdf"):
         await safe_reply(update, "❌ Please upload a `.pdf` file.")
         return
-
     if file.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
         await safe_reply(update, f"❌ File too large (max {MAX_PDF_SIZE_MB} MB).")
         return
-
     fobj = await file.get_file()
     path = await fobj.download_to_drive()
     context.user_data["ocr_pdf"] = path
-    await safe_reply(update, f"✅ PDF received: `{file.file_name}`\nSend /doneocr.",)
+    await safe_reply(update, f"✅ Received: `{file.file_name}`\nNow send /doneocr.",)
 
 async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pdf_path = context.user_data.get("ocr_pdf")
+    lang = context.user_data.get("lang", "English")
     if not pdf_path or not os.path.exists(pdf_path):
-        await safe_reply(update, "⚠️ No PDF uploaded. Use /ocr and send PDF first.")
+        await safe_reply(update, "⚠️ No PDF uploaded. Use /ocr first.")
         return
-
-    await safe_reply(update, "🧠 Detecting language and processing… Please wait ⏳")
-
-    language = detect_language_from_pdf(pdf_path)
-    logging.info(f"Detected language: {language}")
+    await safe_reply(update, f"🧠 Processing PDF in {lang}... Please wait ⏳")
 
     try:
         data_b64 = "".join(stream_b64_encode(pdf_path))
-        clean_text = call_gemini_api(data_b64, language)
+        clean_text = call_gemini_api(data_b64, lang)
     except Exception as e:
         await safe_reply(update, f"❌ Error: {e}")
         return
@@ -181,7 +165,7 @@ async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("ocr_pdf", None)
 
     if not clean_text:
-        await safe_reply(update, "⚠️ All Gemini models failed or returned empty text.")
+        await safe_reply(update, "⚠️ All Gemini models failed or returned empty output.")
         return
 
     txt_path = f"ocr_questions_{int(time.time())}.txt"
@@ -191,14 +175,15 @@ async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, "✅ Generated MCQs", file_path=txt_path)
     os.remove(txt_path)
 
-# ------------------ ERROR HANDLER ------------------
+# Error handler
 def error_handler(update, context):
-    logging.error(msg="Exception while handling update:", exc_info=context.error)
+    logging.error(msg="Unhandled exception:", exc_info=context.error)
 
-# ------------------ MAIN ------------------
+# ---------------- MAIN ----------------
 def run_bot():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("setlang", setlang))
     application.add_handler(CommandHandler("ocr", ocr))
     application.add_handler(CommandHandler("doneocr", doneocr))
     application.add_handler(MessageHandler(filters.Document.PDF, collect_pdf))
@@ -210,4 +195,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-  
+    
