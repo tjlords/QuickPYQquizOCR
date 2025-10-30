@@ -5,12 +5,12 @@ import json
 import time
 import base64
 import logging
-import requests
+import asyncio
 import fitz  # PyMuPDF
+import requests
 from pathlib import Path
 from typing import List
-
-from telegram import Update, File
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -18,23 +18,21 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TimedOut, NetworkError
+from telegram.error import NetworkError, TimedOut
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")  # Render provided domain
-# If not on Render, set WEBHOOK_URL env manually like https://example.com/<TOKEN>
-WEBHOOK_PATH = BOT_TOKEN  # simple secure path
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") or (f"https://{RENDER_EXTERNAL_HOSTNAME}/{WEBHOOK_PATH}" if RENDER_EXTERNAL_HOSTNAME else None)
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/{BOT_TOKEN}" if RENDER_EXTERNAL_HOSTNAME else os.getenv("WEBHOOK_URL")
 
-MAX_PDF_SIZE_MB = int(os.getenv("MAX_PDF_SIZE_MB", 25))  # accept bigger uploads (until Telegram limit)
-PAGES_PER_CHUNK = int(os.getenv("PAGES_PER_CHUNK", 5))  # how many PDF pages per chunk send to Gemini
+MAX_PDF_SIZE_MB = 25
+PAGES_PER_CHUNK = 5
 OUTPUT_DIR = Path("user_data")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Gemini models fallback order
+# Gemini fallback models
 GEMINI_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
@@ -43,11 +41,10 @@ GEMINI_MODELS = [
     "gemini-flash-latest",
 ]
 
-# Logging
+# Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-
-# ---------------- Helpers: file + state ----------------
+# ---------------- Utilities ----------------
 def user_dir(uid: int) -> Path:
     d = OUTPUT_DIR / str(uid)
     d.mkdir(parents=True, exist_ok=True)
@@ -60,310 +57,221 @@ def output_file(uid: int) -> Path:
     return user_dir(uid) / "output.txt"
 
 def save_state(uid: int, state: dict):
-    sfile = state_file(uid)
-    sfile.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    state_file(uid).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def load_state(uid: int) -> dict:
-    sfile = state_file(uid)
-    if sfile.exists():
-        return json.loads(sfile.read_text(encoding="utf-8"))
-    return {}
+    f = state_file(uid)
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
 def append_output(uid: int, text: str):
-    of = output_file(uid)
-    with open(of, "a", encoding="utf-8") as fh:
-        fh.write(text)
-        if not text.endswith("\n"):
-            fh.write("\n")
+    with open(output_file(uid), "a", encoding="utf-8") as f:
+        f.write(text + "\n\n")
 
-# ---------------- Helpers: Gemini ----------------
 def stream_b64_encode(path: Path):
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(57_600), b""):
+        for chunk in iter(lambda: f.read(60_000), b""):
             yield base64.b64encode(chunk).decode("utf-8")
 
-def call_gemini_payload(payload: dict, models: List[str]) -> dict | None:
-    """Try each model with simple retry loop. Return JSON response or None"""
+def call_gemini(payload: dict) -> str | None:
     headers = {"Content-Type": "application/json"}
-    for model in models:
+    for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={GEMINI_API_KEY}"
         for attempt in range(2):
             try:
-                r = requests.post(url, json=payload, headers=headers, timeout=240)
+                r = requests.post(url, headers=headers, json=payload, timeout=240)
                 if r.status_code == 404:
-                    logging.warning("Model not found: %s", model)
+                    logging.warning(f"Model not found: {model}")
                     break
                 r.raise_for_status()
-                return r.json()
+                data = r.json()
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                if text:
+                    logging.info(f"Gemini success using {model}")
+                    return text
             except requests.exceptions.Timeout:
-                logging.warning("Timeout on %s attempt %d", model, attempt + 1)
+                logging.warning(f"Timeout on {model} (attempt {attempt+1})")
                 time.sleep(2)
-                continue
             except Exception as e:
-                logging.warning("Model %s failed: %s", model, e)
+                logging.warning(f"Gemini error on {model}: {e}")
                 time.sleep(1)
-                continue
     return None
 
-def generate_mcqs_from_file_chunk(file_path: Path, language: str) -> str | None:
-    """Encode file chunk and call Gemini to produce MCQs text (string)"""
-    data_b64 = "".join(stream_b64_encode(file_path))
-    payload = {
-        "contents": [{
-            "parts": [
-                {"inlineData": {"mimeType": "application/pdf" if file_path.suffix.lower() == ".pdf" else "image/png", "data": data_b64}},
-                {"text": (
-                    f"Extract ALL text from this document/image and generate multiple-choice questions in {language}. "
-                    "Generate as many MCQs as possible from the content (but reasonable). "
-                    "Format strictly:\n"
-                    "1. Question\n"
-                    "(a) option\n(b) option\n(c) option\n(d) option\n"
-                    "Mark the correct option with a ✅ and add a short 'Ex:' explanation line in the same language.\n"
-                    "Wrap output inside a single code block."
-                )}
-            ]
-        }]
-    }
-    result = call_gemini_payload(payload, GEMINI_MODELS)
-    if not result:
-        return None
-    text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-    return text
-
 # ---------------- Telegram safe send ----------------
-async def safe_send_text(update: Update, text: str):
+async def safe_send(update: Update, text: str):
     for _ in range(3):
         try:
             await update.message.reply_text(text)
             return
-        except (TimedOut, NetworkError) as e:
-            logging.warning("Telegram send timed out: %s", e)
+        except (TimedOut, NetworkError):
             await asyncio.sleep(2)
-    logging.error("Failed to send text after retries")
 
-async def safe_send_file(update: Update, path: Path, caption: str = ""):
+async def safe_send_file(update: Update, path: Path, caption=""):
     for _ in range(3):
         try:
             await update.message.reply_document(document=open(path, "rb"), caption=caption)
             return
-        except (TimedOut, NetworkError) as e:
-            logging.warning("Telegram file send timed out: %s", e)
+        except (TimedOut, NetworkError):
             await asyncio.sleep(2)
-    logging.error("Failed to send file after retries")
 
-# ---------------- Bot command handlers ----------------
+# ---------------- Commands ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_send_text(update,
-        "👋 QuickPYQ OCR Bot ready.\n"
-        "Set language with /setlang Gujarati|Hindi|English (recommended).\n"
-        "Start an OCR session with /ocr — you can upload PDFs and images (multiple). When done, send /doneocr to process.\n"
-        "If processing is interrupted you can resume with /resumeocr."
+    await safe_send(update,
+        "👋 *QuickPYQ OCR Bot Ready!*\n\n"
+        "Commands:\n"
+        "/setlang Gujarati|Hindi|English — set your preferred output language.\n"
+        "/ocr — start OCR session (upload PDFs or images, multiple allowed).\n"
+        "/doneocr — process all uploaded files.\n"
+        "/resumeocr — continue from where it left off.\n",
     )
 
 async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parts = update.message.text.strip().split(maxsplit=1)
-    if len(parts) != 2:
-        await safe_send_text(update, "Usage: /setlang Gujarati   OR   /setlang Hindi   OR   /setlang English")
+    args = update.message.text.split(maxsplit=1)
+    if len(args) != 2 or args[1].capitalize() not in ("Gujarati", "Hindi", "English"):
+        await safe_send(update, "Usage: /setlang Gujarati|Hindi|English")
         return
-    choice = parts[1].strip().capitalize()
-    if choice not in ("Gujarati", "Hindi", "English"):
-        await safe_send_text(update, "Supported: Gujarati, Hindi, English")
-        return
-    context.user_data["lang"] = choice
-    await safe_send_text(update, f"✅ Language set to {choice}")
+    lang = args[1].capitalize()
+    context.user_data["lang"] = lang
+    await safe_send(update, f"✅ Language set to {lang}")
 
 async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
     context.user_data["uploads"] = []
-    # clear existing progress for fresh session
-    st = state_file(uid := uid) if False else None  # noop keeping compatibility
-    await safe_send_text(update, "📄 OCR session started. Upload PDFs or images now (send each file separately). When done, send /doneocr")
+    await safe_send(update, "📄 OCR session started. Upload PDF or image files now. When done, send /doneocr.")
 
 async def collect_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Collects PDF or images during an /ocr session"""
     msg = update.effective_message
     if not msg:
         return
-    doc = None
-    if msg.document:
-        doc = msg.document
-    elif msg.photo:
-        # pick largest photo
-        doc = msg.photo[-1]
-    else:
-        await safe_send_text(update, "Please upload a PDF or an image file.")
+    doc = msg.document or (msg.photo[-1] if msg.photo else None)
+    if not doc:
+        await safe_send(update, "Please upload a PDF or image.")
         return
 
-    # download
-    f = await doc.get_file()
+    file = await doc.get_file()
     uid = update.effective_user.id
-    userfolder = user_dir(uid)
-    filename = f.file_path.split("/")[-1]
-    # ensure unique name
-    local_path = userfolder / f"{int(time.time())}_{filename}"
-    await f.download_to_drive(custom_path=str(local_path))
-    # check size
-    size_mb = local_path.stat().st_size / (1024 * 1024)
-    if size_mb > MAX_PDF_SIZE_MB:
-        await safe_send_text(update, f"❌ File too big ({size_mb:.2f} MB). Max allowed {MAX_PDF_SIZE_MB} MB.")
-        local_path.unlink(missing_ok=True)
+    path = user_dir(uid) / f"{int(time.time())}_{file.file_path.split('/')[-1]}"
+    await file.download_to_drive(str(path))
+
+    if path.stat().st_size > MAX_PDF_SIZE_MB * 1024 * 1024:
+        path.unlink(missing_ok=True)
+        await safe_send(update, f"❌ File too large ({MAX_PDF_SIZE_MB} MB max).")
         return
 
     uploads = context.user_data.get("uploads", [])
-    uploads.append(str(local_path))
+    uploads.append(str(path))
     context.user_data["uploads"] = uploads
-    await safe_send_text(update, f"✅ Saved: {local_path.name} ({size_mb:.2f} MB). Send more or /doneocr to process.")
+    await safe_send(update, f"✅ Saved: {path.name}")
+
+def gemini_payload(path: Path, lang: str):
+    mime = "application/pdf" if path.suffix.lower() == ".pdf" else "image/png"
+    data = "".join(stream_b64_encode(path))
+    return {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": mime, "data": data}},
+                {"text": (
+                    f"Extract all text and generate detailed multiple-choice questions in {lang}. "
+                    "Each question should have (a)–(d) options, mark correct with ✅, and add explanation line starting with 'Ex:'. "
+                    "Write everything in the specified language. Output inside a single code block."
+                )}
+            ]
+        }]
+    }
+
+async def process_file(update: Update, uid: int, path: Path, lang: str):
+    if path.suffix.lower() == ".pdf":
+        doc = fitz.open(str(path))
+        total = doc.page_count
+        for start in range(0, total, PAGES_PER_CHUNK):
+            end = min(start + PAGES_PER_CHUNK, total)
+            chunk = fitz.open()
+            for p in range(start, end):
+                chunk.insert_pdf(doc, from_page=p, to_page=p)
+            chunk_path = user_dir(uid) / f"{path.stem}_chunk_{start}-{end}.pdf"
+            chunk.save(str(chunk_path))
+            chunk.close()
+
+            text = call_gemini(gemini_payload(chunk_path, lang))
+            if text:
+                append_output(uid, text)
+            else:
+                await safe_send(update, f"⚠️ Gemini timeout on {path.name} ({start}-{end}). Saved progress. Use /resumeocr to continue.")
+                return False
+            chunk_path.unlink(missing_ok=True)
+        doc.close()
+    else:
+        text = call_gemini(gemini_payload(path, lang))
+        if text:
+            append_output(uid, text)
+        else:
+            await safe_send(update, f"⚠️ Gemini failed on {path.name}. Use /resumeocr to retry.")
+            return False
+    return True
 
 async def doneocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    uploads = context.user_data.get("uploads", [])
-    if not uploads:
-        await safe_send_text(update, "⚠️ No files uploaded. Start with /ocr and upload files.")
+    files = context.user_data.get("uploads", [])
+    if not files:
+        await safe_send(update, "No files uploaded. Use /ocr first.")
         return
 
     lang = context.user_data.get("lang", "English")
-    await safe_send_text(update, f"🧠 Processing {len(uploads)} file(s) in {lang}. This may take time — I'll append results progressively.")
+    await safe_send(update, f"🧠 Processing {len(files)} files in {lang}...")
 
-    # prepare state
     state = load_state(uid)
-    state.setdefault("todo", uploads.copy())
-    state.setdefault("done", [])
-    state.setdefault("current_index", 0)
+    state["todo"] = files
     save_state(uid, state)
 
-    # process loop
-    for idx, fpath in enumerate(list(state["todo"])):  # iterate over snapshot
-        filepath = Path(fpath)
-        # skip if already done (resuming)
-        if str(filepath) in state.get("done", []):
-            continue
-
-        try:
-            if filepath.suffix.lower() == ".pdf":
-                # split into page-chunks and process sequentially
-                doc = fitz.open(str(filepath))
-                total_pages = doc.page_count
-                pages_processed = 0
-                chunk_id = 0
-                while pages_processed < total_pages:
-                    start = pages_processed
-                    end = min(total_pages, start + PAGES_PER_CHUNK)
-                    chunk_doc = fitz.open()  # new empty
-                    for p in range(start, end):
-                        chunk_doc.insert_pdf(doc, from_page=p, to_page=p)
-                    chunk_path = user_dir(uid) / f"{filepath.stem}_chunk_{chunk_id}.pdf"
-                    chunk_doc.save(str(chunk_path))
-                    chunk_doc.close()
-
-                    # call Gemini for this chunk
-                    logging.info("Processing chunk %s for user %s", chunk_path, uid)
-                    text = generate_mcqs_from_file_chunk(chunk_path, lang)
-                    if text:
-                        append_output(uid, text + "\n")
-                        # save state: mark chunk done by recording page range
-                        s = load_state(uid)
-                        s.setdefault("chunks_done", []).append(f"{filepath.name}:{start}-{end-1}")
-                        save_state(uid, s)
-                        # remove chunk file
-                        chunk_path.unlink(missing_ok=True)
-                        pages_processed = end
-                        chunk_id += 1
-                        # continue to next chunk
-                    else:
-                        # Gemini failed on this chunk — save progress and break to allow resume later
-                        await safe_send_text(update, f"⚠️ Gemini failed on chunk {chunk_id} of {filepath.name}. Progress saved. Use /resumeocr to continue.")
-                        save_state(uid, state)
-                        return
-                doc.close()
-            else:
-                # image (png/jpg) — send single request per image
-                logging.info("Processing image %s", filepath)
-                text = generate_mcqs_from_file_chunk(filepath, lang)
-                if text:
-                    append_output(uid, text + "\n")
-                    s = load_state(uid)
-                    s.setdefault("images_done", []).append(filepath.name)
-                    save_state(uid, s)
-                else:
-                    await safe_send_text(update, f"⚠️ Gemini failed on image {filepath.name}. Progress saved. Use /resumeocr to continue.")
-                    return
-
-            # mark file done and remove from todo
-            st = load_state(uid)
-            st.setdefault("done", []).append(str(filepath))
-            if str(filepath) in st.get("todo", []):
-                st["todo"].remove(str(filepath))
-            save_state(uid, st)
-
-        except Exception as e:
-            logging.exception("Processing error for %s: %s", filepath, e)
-            await safe_send_text(update, f"❌ Error processing {filepath.name}: {e}. Progress saved.")
+    for f in files:
+        path = Path(f)
+        ok = await process_file(update, uid, path, lang)
+        if not ok:
             save_state(uid, state)
             return
+        state.setdefault("done", []).append(f)
+        save_state(uid, state)
 
-    # all done
-    out = output_file(uid)
-    if out.exists():
-        await safe_send_file(update, out, caption="✅ All done — MCQs compiled.")
-    else:
-        await safe_send_text(update, "No output generated.")
-    # clear state
-    try:
-        (user_dir(uid) / "progress.json").unlink(missing_ok=True)
-    except:
-        pass
+    await safe_send_file(update, output_file(uid), caption="✅ All MCQs compiled successfully.")
+    state_file(uid).unlink(missing_ok=True)
 
 async def resumeocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     state = load_state(uid)
-    todo = state.get("todo", [])
+    todo = [f for f in state.get("todo", []) if f not in state.get("done", [])]
     if not todo:
-        await safe_send_text(update, "Nothing to resume or no saved progress.")
+        await safe_send(update, "No saved progress to resume.")
         return
-    # put todo back into context.user_data and call doneocr
     context.user_data["uploads"] = todo
-    await safe_send_text(update, "Resuming processing of saved files...")
+    await safe_send(update, "Resuming pending files...")
     await doneocr(update, context)
 
-# ---------------- Error handler must be async ----------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.error("Exception while handling update:", exc_info=context.error)
+    logging.error("Error:", exc_info=context.error)
     try:
         if update and update.effective_message:
-            await safe_send_text(update, "⚠️ An internal error occurred. Try again or /resumeocr to continue.")
+            await safe_send(update, "⚠️ Internal error occurred. Try /resumeocr.")
     except Exception:
-        logging.exception("Failed to notify user about exception")
+        pass
 
-# ---------------- Main (webhook mode) ----------------
+# ---------------- MAIN ----------------
 def main():
-    if not BOT_TOKEN or not GEMINI_API_KEY:
-        logging.error("BOT_TOKEN or GEMINI_API_KEY not set. Exiting.")
-        raise SystemExit("Missing tokens")
+    if not BOT_TOKEN or not GEMINI_API_KEY or not WEBHOOK_URL:
+        raise SystemExit("Missing BOT_TOKEN, GEMINI_API_KEY or WEBHOOK_URL")
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setlang", setlang))
+    app.add_handler(CommandHandler("ocr", ocr_start))
+    app.add_handler(CommandHandler("doneocr", doneocr))
+    app.add_handler(CommandHandler("resumeocr", resumeocr))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, collect_file))
+    app.add_error_handler(error_handler)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setlang", setlang))
-    application.add_handler(CommandHandler("ocr", ocr_start))
-    application.add_handler(CommandHandler("doneocr", doneocr))
-    application.add_handler(CommandHandler("resumeocr", resumeocr))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, collect_file))
-    application.add_error_handler(error_handler)
-
-    # Ensure webhook URL set
-    if not WEBHOOK_URL:
-        logging.error("WEBHOOK_URL not set and RENDER_EXTERNAL_HOSTNAME not found. Set WEBHOOK_URL env var.")
-        raise SystemExit("WEBHOOK_URL not configured")
-
-    logging.info("Setting webhook to %s", WEBHOOK_URL)
-    # start webhook server (Application.run_webhook will bind port so Render sees it)
-    application.run_webhook(
+    logging.info(f"Setting webhook to {WEBHOOK_URL}")
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         webhook_url=WEBHOOK_URL,
-        # no separate certificate (Render provides HTTPS)
     )
 
 if __name__ == "__main__":
     main()
-  
