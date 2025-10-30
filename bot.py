@@ -529,9 +529,10 @@ def main():
 
     # add health GET route so visiting root shows friendly text
     async def health(request):
-        return ( "text/plain", " QuickPYQ+OCR @TJPATELYT Super Bot running (webhook)" )
+        return ( "text/plain", "QuickPYQ+OCR Super Bot running (webhook)" )
     # add via web_app router
-    app.web_app.router.add_get("/", lambda request: (200, [], b"QuickPYQ+OCR @TJPATELYT Super Bot running (webhook)"))
+    app.web_app.router.add_get("/", lambda request: (200, [], b"QuickPYQ Super Bot running (webhook)"))
+
 
     logging.info("Setting webhook to %s", WEBHOOK_URL)
     app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
