@@ -360,7 +360,6 @@ def main():
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        path=WEBHOOK_PATH,
         webhook_url=WEBHOOK_URL,
         # no separate certificate (Render provides HTTPS)
     )
