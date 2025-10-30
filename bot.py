@@ -231,16 +231,17 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, collect_file))
     app.add_error_handler(error_handler)
 
-    async def run():
-        await app.bot.set_webhook(url=WEBHOOK_URL)
-        logging.info(f"Webhook set to {WEBHOOK_URL}")
-        await app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-        )
+    # Set webhook before starting
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(app.bot.set_webhook(url=WEBHOOK_URL))
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
 
-    asyncio.run(run())
+    # --- DO NOT use asyncio.run() here ---
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+    )
 
 if __name__ == "__main__":
     main()
