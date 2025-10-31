@@ -30,11 +30,11 @@ GEMINI_MODELS = [
     "gemini-1.5-flash"
 ]
 
-# Supported languages
+# Simplified languages - Only English, Gujarati, Hindi
 SUPPORTED_LANGUAGES = {
-    "english": "English", "hindi": "Hindi", "gujarati": "Gujarati",
-    "marathi": "Marathi", "bengali": "Bengali", "tamil": "Tamil",
-    "telugu": "Telugu", "spanish": "Spanish", "french": "French"
+    "english": "English",
+    "hindi": "Hindi", 
+    "gujarati": "Gujarati"
 }
 
 # Supported image formats
