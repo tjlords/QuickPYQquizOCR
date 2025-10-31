@@ -4,10 +4,9 @@ from telegram import Update, InputFile
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    filters, ContextTypes, Updater
 )
 from telegram.error import TimedOut, NetworkError
-from typing import Optional
 import tempfile
 from pathlib import Path
 import json
@@ -30,7 +29,7 @@ GEMINI_MODELS = [
     "gemini-1.5-flash"
 ]
 
-# Simplified languages - Only English, Gujarati, Hindi
+# Simplified languages
 SUPPORTED_LANGUAGES = {
     "english": "English",
     "hindi": "Hindi", 
@@ -40,7 +39,7 @@ SUPPORTED_LANGUAGES = {
 # Supported image formats
 SUPPORTED_IMAGE_TYPES = [".jpg", ".jpeg", ".png", ".webp"]
 
-# ---------------- FLASK APP FOR HEALTH CHECKS ----------------
+# ---------------- FLASK APP ----------------
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -55,7 +54,7 @@ def home():
 def health():
     return json.dumps({"status": "healthy", "timestamp": time.time()})
 
-# Enhanced logging
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -64,24 +63,21 @@ logger = logging.getLogger(__name__)
 
 # ---------------- OWNER VERIFICATION ----------------
 def owner_only(func):
-    """Decorator to restrict access to owner only"""
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def wrapper(update, context):
         user_id = update.effective_user.id
         if user_id != OWNER_USER_ID:
-            logger.warning(f"Unauthorized access attempt from user {user_id}")
-            await update.message.reply_text("❌ Access denied. This is a private bot.")
+            logger.warning(f"Unauthorized access from user {user_id}")
+            update.message.reply_text("❌ Access denied. This is a private bot.")
             return
-        return await func(update, context)
+        return func(update, context)
     return wrapper
 
-# ---------------- HELPERS (keep all your existing helper functions) ----------------
-def stream_b64_encode(file_path: str) -> str:
-    """Encode file to base64"""
+# ---------------- HELPERS ----------------
+def stream_b64_encode(file_path):
     with open(file_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
-def create_pdf_prompt(data_b64: str, language: str, question_count: int):
-    """Create prompt for PDF processing"""
+def create_pdf_prompt(data_b64, language, question_count):
     prompt_text = f"""
     Extract educational content from this PDF and generate exactly {question_count} multiple-choice questions in {language}.
 
@@ -114,8 +110,7 @@ def create_pdf_prompt(data_b64: str, language: str, question_count: int):
         }
     }
 
-def create_image_prompt(data_b64: str, mime_type: str, language: str, question_count: int):
-    """Create prompt for image processing"""
+def create_image_prompt(data_b64, mime_type, language, question_count):
     prompt_text = f"""
     Analyze this educational image and generate exactly {question_count} multiple-choice questions in {language} based on the content.
 
@@ -150,7 +145,6 @@ def create_image_prompt(data_b64: str, mime_type: str, language: str, question_c
     }
 
 def call_gemini_api(payload):
-    """Call Gemini API with retry logic"""
     for model in GEMINI_MODELS:
         for attempt in range(2):
             try:
@@ -183,32 +177,9 @@ def call_gemini_api(payload):
                 
     return None
 
-async def safe_reply(update: Update, text: str, file_path: Optional[str] = None):
-    """Safe reply with automatic file cleanup"""
-    try:
-        if file_path and os.path.exists(file_path):
-            with open(file_path, "rb") as file:
-                await update.effective_message.reply_document(
-                    document=InputFile(file, filename=Path(file_path).name),
-                    caption=text[:1000] if text else "Generated questions"
-                )
-            # Cleanup output file immediately after sending
-            try:
-                os.unlink(file_path)
-                logger.info(f"Cleaned up output file: {file_path}")
-            except Exception as e:
-                logger.error(f"Error cleaning output file: {e}")
-        else:
-            await update.effective_message.reply_text(text)
-        return True
-    except Exception as e:
-        logger.error(f"Send error: {e}")
-        return False
-
-# ---------------- BOT HANDLERS (keep all your existing handler functions) ----------------
+# ---------------- BOT HANDLERS ----------------
 @owner_only
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command for owner only"""
+def start(update, context):
     welcome_text = """
 🔒 *Owner Access - QuickPYQ OCR Bot* 🔒
 
@@ -227,36 +198,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Use /pdf, /image, or /images to start!
     """
-    await safe_reply(update, welcome_text)
+    update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
 @owner_only
-async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set language"""
+def setlang(update, context):
     if context.args:
         lang = context.args[0].lower()
         if lang in SUPPORTED_LANGUAGES:
             context.user_data["language"] = lang
-            await safe_reply(update, f"✅ Language set to {SUPPORTED_LANGUAGES[lang]}")
+            update.message.reply_text(f"✅ Language set to {SUPPORTED_LANGUAGES[lang]}")
             return
     
     lang_list = "\n".join([f"• {lang} - {name}" for lang, name in SUPPORTED_LANGUAGES.items()])
-    await safe_reply(update, f"🌍 Available Languages:\n\n{lang_list}")
+    update.message.reply_text(f"🌍 Available Languages:\n\n{lang_list}")
 
 @owner_only  
-async def setcount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set question count"""
+def setcount(update, context):
     if context.args and context.args[0].isdigit():
         count = int(context.args[0])
         if 1 <= count <= 30:
             context.user_data["question_count"] = count
-            await safe_reply(update, f"✅ Question count set to {count}")
+            update.message.reply_text(f"✅ Question count set to {count}")
             return
     
-    await safe_reply(update, "❌ Use: `/setcount 15` (1-30)")
+    update.message.reply_text("❌ Use: `/setcount 15` (1-30)", parse_mode=ParseMode.MARKDOWN)
 
 @owner_only
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current settings"""
+def status(update, context):
     lang = context.user_data.get("language", "english")
     count = context.user_data.get("question_count", 20)
     
@@ -271,48 +239,42 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Ready to process your files!
     """
-    await safe_reply(update, status_text)
+    update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
 
 @owner_only
-async def pdf_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start PDF processing"""
+def pdf_process(update, context):
     context.user_data["awaiting_pdf"] = True
-    await safe_reply(update, 
+    update.message.reply_text(
         f"📄 Send me a PDF file (≤{MAX_PDF_SIZE_MB}MB)\n"
         f"I'll generate {context.user_data.get('question_count', 20)} questions from it."
     )
 
 @owner_only
-async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start single image processing"""
+def image_process(update, context):
     context.user_data["awaiting_image"] = True
-    await safe_reply(update,
+    update.message.reply_text(
         f"🖼️ Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n"
         f"I'll generate {context.user_data.get('question_count', 20)} questions from it."
     )
 
 @owner_only
-async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start multiple images processing"""
+def images_process(update, context):
     context.user_data["awaiting_images"] = True
     context.user_data["collected_images"] = []
-    await safe_reply(update,
+    update.message.reply_text(
         f"🖼️ Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n"
         f"Send /done when finished to generate questions from all images."
     )
 
 @owner_only
-async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process collected images"""
+def done_images(update, context):
     if not context.user_data.get("collected_images"):
-        await safe_reply(update, "❌ No images collected. Use /images first.")
+        update.message.reply_text("❌ No images collected. Use /images first.")
         return
     
-    await process_multiple_images(update, context)
+    process_multiple_images(update, context)
 
-@owner_only
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming files (PDFs and images)"""
+def handle_file(update, context):
     user_id = update.effective_user.id
     if user_id != OWNER_USER_ID:
         return
@@ -324,46 +286,43 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = msg.document
         if file.file_name.lower().endswith(".pdf"):
             if file.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
-                await safe_reply(update, f"❌ PDF too large. Max {MAX_PDF_SIZE_MB}MB")
+                update.message.reply_text(f"❌ PDF too large. Max {MAX_PDF_SIZE_MB}MB")
                 return
             
             context.user_data["awaiting_pdf"] = False
-            await process_pdf(update, context, file)
+            process_pdf(update, context, file)
             return
     
     # Handle single image
     elif context.user_data.get("awaiting_image") and (msg.document or msg.photo):
-        await process_single_image(update, context, msg)
+        process_single_image(update, context, msg)
         return
     
     # Handle multiple images
     elif context.user_data.get("awaiting_images") and (msg.document or msg.photo):
-        await collect_image(update, context, msg)
+        collect_image(update, context, msg)
         return
 
-async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file):
-    """Process PDF file"""
-    await update.effective_message.reply_chat_action(ChatAction.TYPING)
+def process_pdf(update, context, file):
+    update.message.reply_text("🔄 Processing PDF... Please wait ⏳")
     
     try:
         # Download PDF
-        fobj = await file.get_file()
+        fobj = file.get_file()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             pdf_path = tmp_file.name
-        await fobj.download_to_drive(pdf_path)
+        fobj.download(pdf_path)
         
         # Process PDF
         lang = context.user_data.get("language", "english")
         count = context.user_data.get("question_count", 20)
-        
-        await safe_reply(update, f"🔄 Processing PDF... Generating {count} questions in {lang}")
         
         data_b64 = stream_b64_encode(pdf_path)
         payload = create_pdf_prompt(data_b64, lang, count)
         result = call_gemini_api(payload)
         
         if not result:
-            await safe_reply(update, "❌ Failed to generate questions from PDF")
+            update.message.reply_text("❌ Failed to generate questions from PDF")
             return
         
         # Save and send results
@@ -372,11 +331,18 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file):
             f.write(f"📝 Questions from PDF ({lang}) 📝\n\n{result}")
             txt_path = f.name
         
-        await safe_reply(update, f"✅ Generated {count} questions from PDF", txt_path)
+        with open(txt_path, "rb") as doc:
+            update.message.reply_document(
+                document=doc,
+                caption=f"✅ Generated {count} questions from PDF"
+            )
+        
+        # Cleanup
+        os.unlink(txt_path)
         
     except Exception as e:
         logger.error(f"PDF processing error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
+        update.message.reply_text(f"❌ Error: {str(e)}")
     finally:
         # Cleanup input PDF
         if 'pdf_path' in locals():
@@ -386,13 +352,11 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file):
             except Exception as e:
                 logger.error(f"Error cleaning PDF: {e}")
 
-async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    """Process single image"""
+def process_single_image(update, context, msg):
     context.user_data["awaiting_image"] = False
-    await update.effective_message.reply_chat_action(ChatAction.TYPING)
     
     try:
-        image_path = await download_image(update, context, msg)
+        image_path = download_image(update, context, msg)
         if not image_path:
             return
         
@@ -400,7 +364,7 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
         lang = context.user_data.get("language", "english")
         count = context.user_data.get("question_count", 20)
         
-        await safe_reply(update, f"🔄 Processing image... Generating {count} questions in {lang}")
+        update.message.reply_text("🔄 Processing image... Please wait ⏳")
         
         data_b64 = stream_b64_encode(image_path)
         mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
@@ -409,7 +373,7 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
         result = call_gemini_api(payload)
         
         if not result:
-            await safe_reply(update, "❌ Failed to generate questions from image")
+            update.message.reply_text("❌ Failed to generate questions from image")
             return
         
         # Save and send results
@@ -418,11 +382,18 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
             f.write(f"📝 Questions from Image ({lang}) 📝\n\n{result}")
             txt_path = f.name
         
-        await safe_reply(update, f"✅ Generated {count} questions from image", txt_path)
+        with open(txt_path, "rb") as doc:
+            update.message.reply_document(
+                document=doc,
+                caption=f"✅ Generated {count} questions from image"
+            )
+        
+        # Cleanup
+        os.unlink(txt_path)
         
     except Exception as e:
         logger.error(f"Image processing error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
+        update.message.reply_text(f"❌ Error: {str(e)}")
     finally:
         # Cleanup input image
         if 'image_path' in locals():
@@ -432,40 +403,36 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as e:
                 logger.error(f"Error cleaning image: {e}")
 
-async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    """Collect multiple images"""
+def collect_image(update, context, msg):
     images = context.user_data.get("collected_images", [])
     
     if len(images) >= MAX_IMAGES:
-        await safe_reply(update, f"❌ Maximum {MAX_IMAGES} images reached. Send /done to process.")
+        update.message.reply_text(f"❌ Maximum {MAX_IMAGES} images reached. Send /done to process.")
         return
     
     try:
-        image_path = await download_image(update, context, msg)
+        image_path = download_image(update, context, msg)
         if image_path:
             images.append(image_path)
             context.user_data["collected_images"] = images
-            await safe_reply(update, f"✅ Image {len(images)}/{MAX_IMAGES} received. Send more or /done")
+            update.message.reply_text(f"✅ Image {len(images)}/{MAX_IMAGES} received. Send more or /done")
     except Exception as e:
         logger.error(f"Image collection error: {e}")
-        await safe_reply(update, f"❌ Error collecting image: {str(e)}")
+        update.message.reply_text(f"❌ Error collecting image: {str(e)}")
 
-async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process all collected images"""
-    await update.effective_message.reply_chat_action(ChatAction.TYPING)
-    
+def process_multiple_images(update, context):
     images = context.user_data.get("collected_images", [])
     if not images:
-        await safe_reply(update, "❌ No images to process")
+        update.message.reply_text("❌ No images to process")
         return
     
     try:
         lang = context.user_data.get("language", "english")
         count = context.user_data.get("question_count", 20)
         
-        await safe_reply(update, f"🔄 Processing {len(images)} images... Generating {count} questions in {lang}")
+        update.message.reply_text(f"🔄 Processing {len(images)} images... Please wait ⏳")
         
-        # Process first image (for simplicity, we process only one image from the collection)
+        # Process first image
         image_path = images[0]
         data_b64 = stream_b64_encode(image_path)
         mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
@@ -474,7 +441,7 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
         result = call_gemini_api(payload)
         
         if not result:
-            await safe_reply(update, "❌ Failed to generate questions from images")
+            update.message.reply_text("❌ Failed to generate questions from images")
             return
         
         # Save and send results
@@ -483,11 +450,18 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
             f.write(f"📝 Questions from {len(images)} Images ({lang}) 📝\n\n{result}")
             txt_path = f.name
         
-        await safe_reply(update, f"✅ Generated {count} questions from {len(images)} images", txt_path)
+        with open(txt_path, "rb") as doc:
+            update.message.reply_document(
+                document=doc,
+                caption=f"✅ Generated {count} questions from {len(images)} images"
+            )
+        
+        # Cleanup
+        os.unlink(txt_path)
         
     except Exception as e:
         logger.error(f"Multiple images processing error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
+        update.message.reply_text(f"❌ Error: {str(e)}")
     finally:
         # Cleanup all input images
         for image_path in context.user_data.get("collected_images", []):
@@ -500,21 +474,20 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["collected_images"] = []
         logger.info("Cleaned up all input images")
 
-async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg) -> Optional[str]:
-    """Download image from message"""
+def download_image(update, context, msg):
     try:
         if msg.document:
             file = msg.document
             ext = Path(file.file_name).suffix.lower()
             if ext not in SUPPORTED_IMAGE_TYPES:
-                await safe_reply(update, f"❌ Unsupported image format. Use: {', '.join(SUPPORTED_IMAGE_TYPES)}")
+                update.message.reply_text(f"❌ Unsupported image format. Use: {', '.join(SUPPORTED_IMAGE_TYPES)}")
                 return None
                 
             if file.file_size > MAX_IMAGE_SIZE_MB * 1024 * 1024:
-                await safe_reply(update, f"❌ Image too large. Max {MAX_IMAGE_SIZE_MB}MB")
+                update.message.reply_text(f"❌ Image too large. Max {MAX_IMAGE_SIZE_MB}MB")
                 return None
                 
-            fobj = await file.get_file()
+            fobj = file.get_file()
             
         elif msg.photo:
             # Get the largest photo size
@@ -526,51 +499,51 @@ async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
             image_path = tmp_file.name
         
-        await file.download_to_drive(image_path)
+        fobj.download(image_path)
         return image_path
         
     except Exception as e:
         logger.error(f"Image download error: {e}")
-        await safe_reply(update, f"❌ Error downloading image: {str(e)}")
+        update.message.reply_text(f"❌ Error downloading image: {str(e)}")
         return None
 
-# ---------------- FIXED MAIN FUNCTION ----------------
+# ---------------- MAIN ----------------
 def run_bot():
-    """Run both Flask and Telegram bot properly"""
+    """Run both Flask and Telegram bot"""
     # Build Telegram application
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setlang", setlang))
-    application.add_handler(CommandHandler("setcount", setcount))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("pdf", pdf_process))
-    application.add_handler(CommandHandler("image", image_process))
-    application.add_handler(CommandHandler("images", images_process))
-    application.add_handler(CommandHandler("done", done_images))
-    application.add_handler(MessageHandler(
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("setlang", setlang))
+    dp.add_handler(CommandHandler("setcount", setcount))
+    dp.add_handler(CommandHandler("status", status))
+    dp.add_handler(CommandHandler("pdf", pdf_process))
+    dp.add_handler(CommandHandler("image", image_process))
+    dp.add_handler(CommandHandler("images", images_process))
+    dp.add_handler(CommandHandler("done", done_images))
+    dp.add_handler(MessageHandler(
         filters.Document.ALL | filters.PHOTO, handle_file
     ))
     
     logger.info("Starting OCR Bot with Flask health checks...")
     
-    # Run Flask in main thread (this is crucial for Render)
+    # Run Flask in separate thread
     from threading import Thread
     import waitress
     
     def run_flask():
-        """Run Flask with production server"""
         logger.info(f"Starting Flask server on port {PORT}")
         waitress.serve(flask_app, host='0.0.0.0', port=PORT)
     
-    # Start Flask in a separate thread
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Start Telegram bot in main thread
+    # Start Telegram bot
     logger.info("Starting Telegram bot polling...")
-    application.run_polling(drop_pending_updates=True)
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     run_bot()
