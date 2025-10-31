@@ -82,46 +82,68 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = T
         prompt_text = f"""
         Analyze this PDF which contains existing multiple-choice questions. Extract and reformat ALL available questions.
 
-        FORMAT REQUIREMENTS:
+        CRITICAL FORMAT REQUIREMENTS:
         1. Keep the QUESTION TEXT and OPTIONS in their ORIGINAL LANGUAGE
         2. Only the EXPLANATION should be in {explanation_language}
-        3. Format each question exactly as follows:
+        3. Format each question EXACTLY as follows - NO DEVIATIONS:
 
         1. [Original question text]
         a) [Option A]
-        b) [Option B]
+        b) [Option B] 
         c) [Option C]
-        d) [Option D]
-        ✅ [Letter of correct option]
-        Ex: [Brief explanation in {explanation_language}]
+        d) [Option D] ✅
+        Ex: [PROPER EXPLANATION in {explanation_language} - explain WHY the answer is correct, NOT just translation]
 
         4. Extract ALL available questions from the PDF
         5. Do NOT translate the questions or options
         6. Do NOT add new questions or modify existing ones
         7. Maintain the original numbering if available
-        8. Only explanations should be in {explanation_language}
+        8. For explanations: Explain the CONCEPT/RULE/REASONING, not just translate
+        9. Place the ✅ symbol IMMEDIATELY AFTER the correct option
+        10. Make explanations EDUCATIONAL - explain the grammar rule, logic, or concept
+
+        EXAMPLE OF CORRECT FORMAT:
+        1. વાક્યમાં કૃદંતનો પ્રકાર જણાવો: 'હું ખાવા માટે આવ્યો જ નથી.'
+        a) હેત્વર્થ કૃદંત ✅
+        b) સામાન્ય કૃદંત
+        c) સંબંધક કૃદંત
+        d) ભૂત કૃદંત
+        Ex: 'ખાવા માટે' એ ક્રિયાનો હેતુ દર્શાવે છે. હેત્વર્થ કૃદંતમાં 'માટે' પ્રત્યય લાગે છે અને તે ક્રિયાના ઉદ્દેશ્યને દર્શાવે છે.
+
+        EXAMPLE OF CORRECT FORMAT:
+        1. If she does not work she ________
+        a) Will be failed
+        b) Will not fail
+        c) Fails
+        d) Will fail ✅
+        Ex: આ future simple tenseનું વાક્ય છે. Negative condition પછી future simple tense માં 'will + verb' આવે છે.
+
+        STRICTLY FOLLOW THIS EXACT FORMAT FOR EVERY QUESTION.
         """
     else:
         question_count = 30
         prompt_text = f"""
         Extract educational content from this PDF and generate exactly {question_count} multiple-choice questions.
 
-        FORMAT REQUIREMENTS:
+        CRITICAL FORMAT REQUIREMENTS:
         1. Keep the QUESTION TEXT and OPTIONS in their ORIGINAL LANGUAGE
         2. Only the EXPLANATION should be in {explanation_language}
-        3. Format each question exactly as follows:
+        3. Format each question EXACTLY as follows - NO DEVIATIONS:
 
         1. [Question text in original language]
-        a) [Option A in original language]
-        b) [Option B in original language]
-        c) [Option C in original language]
-        d) [Option D in original language]
-        ✅ [Letter of correct option]
-        Ex: [Brief explanation in {explanation_language}]
+        a) [Option A]
+        b) [Option B] 
+        c) [Option C]
+        d) [Option D] ✅
+        Ex: [PROPER EXPLANATION in {explanation_language} - explain the concept/rule/reasoning]
 
         4. Generate exactly {question_count} questions
         5. Do NOT translate the questions or options
         6. Only explanations should be in {explanation_language}
+        7. Place the ✅ symbol IMMEDIATELY AFTER the correct option
+        8. Make explanations EDUCATIONAL - not just translations
+
+        STRICTLY FOLLOW THIS EXACT FORMAT.
         """
     
     return {
@@ -132,7 +154,7 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = T
             ]
         }],
         "generationConfig": {
-            "temperature": 0.3,
+            "temperature": 0.1,
             "maxOutputTokens": 8192,
         }
     }
@@ -142,46 +164,46 @@ def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str
         prompt_text = f"""
         Analyze this image which contains existing multiple-choice questions. Extract and reformat ALL available questions.
 
-        FORMAT REQUIREMENTS:
+        CRITICAL FORMAT REQUIREMENTS:
         1. Keep the QUESTION TEXT and OPTIONS in their ORIGINAL LANGUAGE
         2. Only the EXPLANATION should be in {explanation_language}
-        3. Format each question exactly as follows:
+        3. Format each question EXACTLY as follows - NO DEVIATIONS:
 
         1. [Original question text]
         a) [Option A]
-        b) [Option B]
+        b) [Option B] 
         c) [Option C]
-        d) [Option D]
-        ✅ [Letter of correct option]
-        Ex: [Brief explanation in {explanation_language}]
+        d) [Option D] ✅
+        Ex: [PROPER EXPLANATION in {explanation_language} - explain WHY the answer is correct, NOT just translation]
 
         4. Extract ALL available questions from the image
         5. Do NOT translate the questions or options
         6. Do NOT add new questions or modify existing ones
         7. Maintain the original numbering if available
-        8. Only explanations should be in {explanation_language}
+        8. Place the ✅ symbol IMMEDIATELY AFTER the correct option
+        9. Make explanations EDUCATIONAL - explain the concept/rule/reasoning
         """
     else:
         question_count = 20
         prompt_text = f"""
         Analyze this educational image and generate exactly {question_count} multiple-choice questions.
 
-        FORMAT REQUIREMENTS:
+        CRITICAL FORMAT REQUIREMENTS:
         1. Keep the QUESTION TEXT and OPTIONS in the SAME LANGUAGE as they appear in the image
         2. Only the EXPLANATION should be in {explanation_language}
-        3. Format each question exactly as follows:
+        3. Format each question EXACTLY as follows - NO DEVIATIONS:
 
         1. [Question text in original language]
-        a) [Option A in original language]
-        b) [Option B in original language]
-        c) [Option C in original language]
-        d) [Option D in original language]
-        ✅ [Letter of correct option]
-        Ex: [Brief explanation in {explanation_language}]
+        a) [Option A]
+        b) [Option B] 
+        c) [Option C]
+        d) [Option D] ✅
+        Ex: [PROPER EXPLANATION in {explanation_language} - explain the concept/rule/reasoning]
 
         4. Generate exactly {question_count} questions
         5. Do NOT translate the questions or options
-        6. Only explanations should be in {explanation_language}
+        6. Place the ✅ symbol IMMEDIATELY AFTER the correct option
+        7. Make explanations EDUCATIONAL - not just translations
         """
     
     return {
@@ -192,7 +214,7 @@ def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str
             ]
         }],
         "generationConfig": {
-            "temperature": 0.3,
+            "temperature": 0.1,
             "maxOutputTokens": 8192,
         }
     }
@@ -662,8 +684,8 @@ async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg
 
 def clean_question_format(text: str) -> str:
     """Clean and format questions to your preferred format"""
-    # Remove emojis and extra symbols
-    text = re.sub(r'[🔍📝✅🔑💡🎯🔄📄🖼️🌍📊]', '', text)
+    # Remove emojis and extra symbols (keep only ✅ for correct answers)
+    text = re.sub(r'[🔍📝🔑💡🎯🔄📄🖼️🌍📊]', '', text)
     
     # Ensure proper formatting
     lines = text.split('\n')
