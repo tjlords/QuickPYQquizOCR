@@ -77,8 +77,8 @@ def stream_b64_encode(file_path: str) -> str:
     with open(file_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
-def create_pdf_prompt(data_b64: str, explanation_language: str, question_count: int, is_mcq_pdf: bool = False):
-    if is_mcq_pdf:
+def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = True):
+    if is_mcq:
         prompt_text = f"""
         Analyze this PDF which contains existing multiple-choice questions. Extract and reformat ALL available questions.
 
@@ -102,6 +102,7 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, question_count: 
         8. Only explanations should be in {explanation_language}
         """
     else:
+        question_count = 30
         prompt_text = f"""
         Extract educational content from this PDF and generate exactly {question_count} multiple-choice questions.
 
@@ -136,8 +137,8 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, question_count: 
         }
     }
 
-def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str, question_count: int, is_mcq_image: bool = False):
-    if is_mcq_image:
+def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str, is_mcq: bool = True):
+    if is_mcq:
         prompt_text = f"""
         Analyze this image which contains existing multiple-choice questions. Extract and reformat ALL available questions.
 
@@ -161,6 +162,7 @@ def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str
         8. Only explanations should be in {explanation_language}
         """
     else:
+        question_count = 20
         prompt_text = f"""
         Analyze this educational image and generate exactly {question_count} multiple-choice questions.
 
@@ -257,23 +259,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *Available Commands:*
 /setlang - Set explanation language
-/setcount - Set default question count (1-100)  
-/pdf - Process PDF file
+/setcount - Set question count for content
+/pdf - Process PDF file  
 /image - Process single image
 /images - Process multiple images
 /status - Current settings
 
-*Smart Features:*
-• MCQ PDFs: Extracts ALL available questions automatically
-• Content PDFs: Generates specified number of questions
-• Auto-detect: 30 questions if count not set
-• Poll-ready format: Clean output for your poll bot
+*After sending files, use:*
+/mcq - Extract all questions (for question papers)
+/content - Generate questions (for textbooks)
 
 *Current Limits:*
 • PDF: ≤5MB
 • Images: ≤3MB each, max 10 images
-
-Use /pdf, /image, or /images to start!
     """
     await safe_reply(update, welcome_text)
 
@@ -295,7 +293,7 @@ async def setcount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = int(context.args[0])
         if 1 <= count <= 100:
             context.user_data["question_count"] = count
-            await safe_reply(update, f"✅ Default question count set to {count}")
+            await safe_reply(update, f"✅ Question count set to {count}")
             return
     
     await safe_reply(update, "❌ Use: `/setcount 25` (1-100)")
@@ -313,61 +311,64 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • PDF Limit: {MAX_PDF_SIZE_MB}MB
 • Image Limit: {MAX_IMAGE_SIZE_MB}MB
 • Max Images: {MAX_IMAGES}
-
-*Smart Processing:*
-• MCQ PDFs: Extract ALL questions
-• Content PDFs: Generate {count} questions
-• Auto-fallback: 30 questions if not set
     """
     await safe_reply(update, status_text)
 
+# ---------------- PDF HANDLERS ----------------
 @owner_only
 async def pdf_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_pdf"] = True
-    count = context.user_data.get("question_count", 30)
-    
     await safe_reply(update, 
-        f"📄 *PDF Processing Ready*\n\n"
-        f"Send me a PDF file (≤{MAX_PDF_SIZE_MB}MB)\n\n"
-        f"*Smart Detection:*\n"
-        f"• MCQ PDFs: Extract ALL questions automatically\n"
-        f"• Content PDFs: Generate {count} questions\n"
-        f"• Questions keep original language\n"
-        f"• Explanations in your set language\n\n"
-        f"After sending PDF, I'll ask if it's MCQ or content type."
+        f"📄 Send me a PDF file (≤{MAX_PDF_SIZE_MB}MB)\n\n"
+        f"After sending, choose:\n"
+        f"• /mcq - for question papers (extracts all)\n"
+        f"• /content - for textbooks (generates questions)"
     )
 
 @owner_only
+async def mcq_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process as MCQ - extract all questions"""
+    if context.user_data.get("current_file"):
+        file_path = context.user_data["current_file"]
+        await process_pdf(update, context, file_path, is_mcq=True)
+    elif context.user_data.get("current_image"):
+        image_path = context.user_data["current_image"]
+        await process_single_image(update, context, image_path, is_mcq=True)
+    else:
+        await safe_reply(update, "❌ No file found. Please send a file first.")
+
+@owner_only
+async def content_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process as content - generate questions"""
+    if context.user_data.get("current_file"):
+        file_path = context.user_data["current_file"]
+        await process_pdf(update, context, file_path, is_mcq=False)
+    elif context.user_data.get("current_image"):
+        image_path = context.user_data["current_image"]
+        await process_single_image(update, context, image_path, is_mcq=False)
+    else:
+        await safe_reply(update, "❌ No file found. Please send a file first.")
+
+# ---------------- IMAGE HANDLERS ----------------
+@owner_only
 async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_image"] = True
-    count = context.user_data.get("question_count", 30)
-    
     await safe_reply(update,
-        f"🖼️ *Image Processing Ready*\n\n"
-        f"Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n\n"
-        f"*Smart Detection:*\n"
-        f"• MCQ Images: Extract ALL questions automatically\n"
-        f"• Content Images: Generate {count} questions\n"
-        f"• Questions keep original language\n"
-        f"• Explanations in your set language\n\n"
-        f"After sending image, I'll ask if it's MCQ or content type."
+        f"🖼️ Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n\n"
+        f"After sending, choose:\n"
+        f"• /mcq - for question images (extracts all)\n"
+        f"• /content - for content images (generates questions)"
     )
 
 @owner_only
 async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_images"] = True
     context.user_data["collected_images"] = []
-    count = context.user_data.get("question_count", 30)
-    
     await safe_reply(update,
-        f"🖼️ *Multiple Images Processing*\n\n"
-        f"Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n\n"
-        f"*Smart Detection:*\n"
-        f"• MCQ Images: Extract ALL questions automatically\n"
-        f"• Content Images: Generate {count} questions\n"
-        f"• Questions keep original language\n"
-        f"• Explanations in your set language\n\n"
-        f"Send /done when finished, then I'll ask for type."
+        f"🖼️ Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n\n"
+        f"Send /done when finished, then choose:\n"
+        f"• /mcq - for question images\n"
+        f"• /content - for content images"
     )
 
 @owner_only
@@ -379,44 +380,12 @@ async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_images"] = False
     await safe_reply(update,
         f"✅ Collected {len(context.user_data['collected_images'])} images\n\n"
-        f"Is this MCQ content or educational content?\n\n"
-        f"• *MCQ Type*: Send /mcq (extracts all existing questions)\n"
-        f"• *Content Type*: Send /content (generates new questions)\n"
-        f"• Or specify count: /count 15"
+        f"Choose processing type:\n"
+        f"• /mcq - Extract ALL questions\n"
+        f"• /content - Generate questions"
     )
 
-@owner_only
-async def set_mcq_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["is_mcq"] = True
-    if context.user_data.get("awaiting_pdf"):
-        await process_pdf(update, context, context.user_data["current_file"])
-    elif context.user_data.get("collected_images"):
-        await process_multiple_images(update, context)
-
-@owner_only
-async def set_content_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["is_mcq"] = False
-    count = context.user_data.get("question_count", 30)
-    if context.user_data.get("awaiting_pdf"):
-        await process_pdf(update, context, context.user_data["current_file"])
-    elif context.user_data.get("collected_images"):
-        await process_multiple_images(update, context)
-
-@owner_only
-async def set_custom_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args and context.args[0].isdigit():
-        count = int(context.args[0])
-        if 1 <= count <= 100:
-            context.user_data["is_mcq"] = False
-            context.user_data["custom_count"] = count
-            if context.user_data.get("awaiting_pdf"):
-                await process_pdf(update, context, context.user_data["current_file"])
-            elif context.user_data.get("collected_images"):
-                await process_multiple_images(update, context)
-            return
-    
-    await safe_reply(update, "❌ Use: `/count 25` (1-100)")
-
+# ---------------- FILE HANDLERS ----------------
 @owner_only
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -433,7 +402,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_reply(update, f"❌ PDF too large. Max {MAX_PDF_SIZE_MB}MB")
                 return
             
-            # Download file first
+            # Download file
+            await update.message.reply_text("📥 Downloading PDF...")
             fobj = await file.get_file()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 pdf_path = tmp_file.name
@@ -444,16 +414,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await safe_reply(update,
                 f"✅ PDF received: `{file.file_name}`\n\n"
-                f"Is this MCQ content or educational content?\n\n"
-                f"• *MCQ Type*: Send /mcq (extracts all existing questions)\n"
-                f"• *Content Type*: Send /content (generates new questions)\n"
-                f"• Or specify count: /count 15"
+                f"Choose processing type:\n"
+                f"• /mcq - Extract ALL questions\n"
+                f"• /content - Generate questions"
             )
             return
     
     # Handle single image
     elif context.user_data.get("awaiting_image") and (msg.document or msg.photo):
-        await process_single_image(update, context, msg)
+        await process_single_image_upload(update, context, msg)
         return
     
     # Handle multiple images
@@ -461,31 +430,53 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await collect_image(update, context, msg)
         return
 
-async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str):
+async def process_single_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
+    """Handle single image upload"""
+    context.user_data["awaiting_image"] = False
+    
+    try:
+        image_path = await download_image(update, context, msg)
+        if not image_path:
+            return
+        
+        context.user_data["current_image"] = image_path
+        
+        await safe_reply(update,
+            f"✅ Image received\n\n"
+            f"Choose processing type:\n"
+            f"• /mcq - Extract ALL questions\n"
+            f"• /content - Generate questions"
+        )
+        
+    except Exception as e:
+        logger.error(f"Image upload error: {e}")
+        await safe_reply(update, f"❌ Error: {str(e)}")
+
+# ---------------- PROCESSING FUNCTIONS ----------------
+async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str, is_mcq: bool = True):
     await update.message.reply_chat_action(ChatAction.TYPING)
     
     try:
         lang = context.user_data.get("language", "gujarati")
-        is_mcq = context.user_data.get("is_mcq", False)
         
         if is_mcq:
-            await safe_reply(update, f"🔄 Processing MCQ PDF... Extracting ALL questions with {lang} explanations")
-            question_count = 0  # Extract all
+            await safe_reply(update, f"🔄 Processing MCQ PDF... Extracting ALL questions\nThis may take 2-5 minutes...")
         else:
-            custom_count = context.user_data.get("custom_count")
-            question_count = custom_count if custom_count else context.user_data.get("question_count", 30)
-            await safe_reply(update, f"🔄 Processing content PDF... Generating {question_count} questions with {lang} explanations")
+            await safe_reply(update, f"🔄 Processing content PDF... Generating questions\nThis may take 2-5 minutes...")
         
         data_b64 = stream_b64_encode(file_path)
-        payload = create_pdf_prompt(data_b64, lang, question_count, is_mcq)
+        payload = create_pdf_prompt(data_b64, lang, is_mcq)
         result = call_gemini_api(payload)
         
         if not result:
-            await safe_reply(update, "❌ Failed to process PDF")
+            await safe_reply(update, "❌ Failed to process PDF. The file might be too large or contain images.")
             return
         
         # Clean and format result
         cleaned_result = clean_question_format(result)
+        
+        # Count questions
+        question_count = len(re.findall(r'\d+\.', cleaned_result))
         
         # Save and send results
         file_type = "mcq" if is_mcq else "content"
@@ -495,41 +486,129 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_p
             txt_path = f.name
         
         action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} questions from PDF", txt_path)
+        await safe_reply(update, f"✅ Successfully {action} {question_count} questions", txt_path)
         
     except Exception as e:
         logger.error(f"PDF processing error: {e}")
         await safe_reply(update, f"❌ Error: {str(e)}")
     finally:
-        # Cleanup input PDF
+        # Cleanup
         if 'file_path' in locals():
             try:
                 os.unlink(file_path)
                 logger.info("Cleaned up input PDF")
+                context.user_data.pop("current_file", None)
             except Exception as e:
                 logger.error(f"Error cleaning PDF: {e}")
 
-async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    context.user_data["awaiting_image"] = False
+async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, image_path: str, is_mcq: bool = True):
+    await update.message.reply_chat_action(ChatAction.TYPING)
     
     try:
-        image_path = await download_image(update, context, msg)
-        if not image_path:
+        lang = context.user_data.get("language", "gujarati")
+        
+        if is_mcq:
+            await safe_reply(update, f"🔄 Processing MCQ image... Extracting ALL questions")
+        else:
+            await safe_reply(update, f"🔄 Processing content image... Generating questions")
+        
+        data_b64 = stream_b64_encode(image_path)
+        mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
+        
+        payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
+        result = call_gemini_api(payload)
+        
+        if not result:
+            await safe_reply(update, "❌ Failed to process image.")
             return
         
-        # Ask for type
-        context.user_data["current_file"] = image_path
-        await safe_reply(update,
-            f"✅ Image received\n\n"
-            f"Is this MCQ content or educational content?\n\n"
-            f"• *MCQ Type*: Send /mcq (extracts all existing questions)\n"
-            f"• *Content Type*: Send /content (generates new questions)\n"
-            f"• Or specify count: /count 15"
-        )
+        # Clean and format result
+        cleaned_result = clean_question_format(result)
+        
+        # Count questions
+        question_count = len(re.findall(r'\d+\.', cleaned_result))
+        
+        # Save and send results
+        file_type = "mcq" if is_mcq else "content"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
+            f.write(cleaned_result)
+            txt_path = f.name
+        
+        action = "extracted" if is_mcq else "generated"
+        await safe_reply(update, f"✅ Successfully {action} {question_count} questions from image", txt_path)
         
     except Exception as e:
         logger.error(f"Image processing error: {e}")
         await safe_reply(update, f"❌ Error: {str(e)}")
+    finally:
+        # Cleanup
+        if 'image_path' in locals():
+            try:
+                os.unlink(image_path)
+                logger.info("Cleaned up input image")
+                context.user_data.pop("current_image", None)
+            except Exception as e:
+                logger.error(f"Error cleaning image: {e}")
+
+async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE, is_mcq: bool = True):
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    
+    images = context.user_data.get("collected_images", [])
+    if not images:
+        await safe_reply(update, "❌ No images to process")
+        return
+    
+    try:
+        lang = context.user_data.get("language", "gujarati")
+        
+        if is_mcq:
+            await safe_reply(update, f"🔄 Processing {len(images)} MCQ images... Extracting ALL questions")
+        else:
+            await safe_reply(update, f"🔄 Processing {len(images)} content images... Generating questions")
+        
+        # Process first image
+        image_path = images[0]
+        data_b64 = stream_b64_encode(image_path)
+        mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
+        
+        payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
+        result = call_gemini_api(payload)
+        
+        if not result:
+            await safe_reply(update, "❌ Failed to generate questions from images")
+            return
+        
+        # Clean and format result
+        cleaned_result = clean_question_format(result)
+        
+        # Count questions
+        question_count = len(re.findall(r'\d+\.', cleaned_result))
+        
+        # Save and send results
+        file_type = "mcq" if is_mcq else "content"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
+            f.write(cleaned_result)
+            txt_path = f.name
+        
+        action = "extracted" if is_mcq else "generated"
+        await safe_reply(update, f"✅ Successfully {action} {question_count} questions from {len(images)} images", txt_path)
+        
+    except Exception as e:
+        logger.error(f"Multiple images processing error: {e}")
+        await safe_reply(update, f"❌ Error: {str(e)}")
+    finally:
+        # Cleanup all input images
+        for image_path in context.user_data.get("collected_images", []):
+            try:
+                os.unlink(image_path)
+            except Exception as e:
+                logger.error(f"Error cleaning image {image_path}: {e}")
+        
+        context.user_data["awaiting_images"] = False
+        context.user_data["collected_images"] = []
+        logger.info("Cleaned up all input images")
 
 async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
     images = context.user_data.get("collected_images", [])
@@ -547,84 +626,6 @@ async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg)
     except Exception as e:
         logger.error(f"Image collection error: {e}")
         await safe_reply(update, f"❌ Error collecting image: {str(e)}")
-
-async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_chat_action(ChatAction.TYPING)
-    
-    images = context.user_data.get("collected_images", [])
-    if not images:
-        await safe_reply(update, "❌ No images to process")
-        return
-    
-    try:
-        lang = context.user_data.get("language", "gujarati")
-        is_mcq = context.user_data.get("is_mcq", False)
-        
-        if is_mcq:
-            await safe_reply(update, f"🔄 Processing {len(images)} MCQ images... Extracting ALL questions with {lang} explanations")
-            question_count = 0
-        else:
-            custom_count = context.user_data.get("custom_count")
-            question_count = custom_count if custom_count else context.user_data.get("question_count", 30)
-            await safe_reply(update, f"🔄 Processing {len(images)} content images... Generating {question_count} questions with {lang} explanations")
-        
-        # Process first image
-        image_path = images[0]
-        data_b64 = stream_b64_encode(image_path)
-        mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
-        
-        payload = create_image_prompt(data_b64, mime_type, lang, question_count, is_mcq)
-        result = call_gemini_api(payload)
-        
-        if not result:
-            await safe_reply(update, "❌ Failed to generate questions from images")
-            return
-        
-        # Clean and format result
-        cleaned_result = clean_question_format(result)
-        
-        # Save and send results
-        file_type = "mcq" if is_mcq else "content"
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
-                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
-            f.write(cleaned_result)
-            txt_path = f.name
-        
-        action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} questions from {len(images)} images", txt_path)
-        
-    except Exception as e:
-        logger.error(f"Multiple images processing error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
-    finally:
-        # Cleanup all input images
-        for image_path in context.user_data.get("collected_images", []):
-            try:
-                os.unlink(image_path)
-            except Exception as e:
-                logger.error(f"Error cleaning image {image_path}: {e}")
-        
-        context.user_data["awaiting_images"] = False
-        context.user_data["collected_images"] = []
-        logger.info("Cleaned up all input images")
-
-def clean_question_format(text: str) -> str:
-    """Clean and format questions to your preferred format"""
-    # Remove emojis and extra symbols
-    text = re.sub(r'[🔍📝✅🔑💡🎯🔄📄🖼️🌍📊]', '', text)
-    
-    # Ensure proper formatting
-    lines = text.split('\n')
-    cleaned_lines = []
-    
-    for line in lines:
-        line = line.strip()
-        if line:
-            # Fix numbering format
-            line = re.sub(r'^(Q\d+\.|Question\s*\d+:)', lambda m: m.group(1).split('.')[0].replace('Question', '').replace(' ', '') + '.', line)
-            cleaned_lines.append(line)
-    
-    return '\n'.join(cleaned_lines)
 
 async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
     try:
@@ -659,13 +660,31 @@ async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg
         await safe_reply(update, f"❌ Error downloading image: {str(e)}")
         return None
 
+def clean_question_format(text: str) -> str:
+    """Clean and format questions to your preferred format"""
+    # Remove emojis and extra symbols
+    text = re.sub(r'[🔍📝✅🔑💡🎯🔄📄🖼️🌍📊]', '', text)
+    
+    # Ensure proper formatting
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if line:
+            # Fix numbering format
+            line = re.sub(r'^(Q\d+\.|Question\s*\d+:)', lambda m: m.group(1).split('.')[0].replace('Question', '').replace(' ', '') + '.', line)
+            cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+
 # ---------------- MAIN ----------------
 def run_bot():
     """Run both Flask and Telegram bot"""
     # Build Telegram application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Add handlers
+    # Add ALL handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setlang", setlang))
     application.add_handler(CommandHandler("setcount", setcount))
@@ -674,9 +693,8 @@ def run_bot():
     application.add_handler(CommandHandler("image", image_process))
     application.add_handler(CommandHandler("images", images_process))
     application.add_handler(CommandHandler("done", done_images))
-    application.add_handler(CommandHandler("mcq", set_mcq_type))
-    application.add_handler(CommandHandler("content", set_content_type))
-    application.add_handler(CommandHandler("count", set_custom_count))
+    application.add_handler(CommandHandler("mcq", mcq_command))
+    application.add_handler(CommandHandler("content", content_command))
     application.add_handler(MessageHandler(
         filters.Document.ALL | filters.PHOTO, handle_file
     ))
