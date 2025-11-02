@@ -16,10 +16,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "YOUR_GEMINI_API_KEY"
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "123456789"))
 PORT = int(os.getenv("PORT", 10000))
-MAX_PDF_SIZE_MB = 15  # Increased from 5MB to 15MB
-MAX_IMAGE_SIZE_MB = 5  # Increased from 3MB to 5MB
+MAX_PDF_SIZE_MB = 15
+MAX_IMAGE_SIZE_MB = 5
 MAX_IMAGES = 10
-PROCESSING_TIMEOUT = 300  # 5 minutes timeout for large files
+PROCESSING_TIMEOUT = 300
 
 # Your working Gemini models from testing
 GEMINI_MODELS = [
@@ -43,12 +43,6 @@ SUPPORTED_LANGUAGES = {
 SUPPORTED_IMAGE_TYPES = [
     ".jpg", ".jpeg", ".png", ".webp", 
     ".bmp", ".tiff", ".tif", ".heic", ".heif"
-]
-
-# Supported MIME types
-SUPPORTED_MIME_TYPES = [
-    "image/jpeg", "image/jpg", "image/png", "image/webp",
-    "image/bmp", "image/tiff", "image/heic", "image/heif"
 ]
 
 # ---------------- FLASK APP ----------------
@@ -105,44 +99,133 @@ def get_mime_type(file_path: str) -> str:
     }
     return mime_map.get(ext, 'image/jpeg')
 
-def clean_question_format(text: str) -> str:
-    """Clean and format questions to your preferred format with proper statement numbering"""
-    # Remove emojis and extra symbols (keep only ✅ for correct answers)
-    text = re.sub(r'[🔍📝🔑💡🎯🔄📄🖼️🌍📊]', '', text)
-    
-    # Split the text into lines
+def optimize_for_poll(text: str) -> str:
+    """
+    Optimize question and explanation length for Telegram polls
+    Telegram limits:
+    - Poll question: 4096 characters
+    - Quiz solution (explanation): 200 characters
+    - Options: ~100 characters each (informal limit)
+    """
     lines = text.split('\n')
-    cleaned_lines = []
-    current_question = []
+    optimized_lines = []
     
     for line in lines:
-        line = line.strip()
-        if not line:
+        if not line.strip():
+            optimized_lines.append(line)
             continue
             
-        # Check if this line starts a new question
-        if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)']):
-            # Process previous question if exists
-            if current_question:
-                cleaned_lines.extend(process_single_question(current_question))
-                cleaned_lines.append('')  # Add blank line between questions
-                current_question = []
-            
-            current_question.append(line)
-        elif current_question:
-            current_question.append(line)
+        # Handle question lines (numbered lines)
+        if re.match(r'^\d+\.', line):
+            if len(line) > 4000:  # Leave some buffer under 4096
+                # Smart shortening for questions
+                sentences = re.split(r'[.!?]', line)
+                if len(sentences) > 1:
+                    # Keep first complete sentence
+                    first_sentence = sentences[0].strip()
+                    if first_sentence and len(first_sentence) <= 4000:
+                        optimized_lines.append(first_sentence + '.')
+                    else:
+                        # If first sentence is still too long, truncate intelligently
+                        words = line.split()
+                        shortened = []
+                        current_length = 0
+                        
+                        for word in words:
+                            if current_length + len(word) + 1 <= 4000:
+                                shortened.append(word)
+                                current_length += len(word) + 1
+                            else:
+                                break
+                        
+                        if shortened:
+                            optimized_lines.append(' '.join(shortened))
+                        else:
+                            optimized_lines.append(line[:4000])
+                else:
+                    # Single sentence question, truncate if needed
+                    optimized_lines.append(line[:4000])
+            else:
+                optimized_lines.append(line)
+                
+        # Handle explanation lines (Ex: ...) - MAX 200 chars
+        elif line.startswith('Ex:'):
+            explanation = line[3:].strip()  # Remove "Ex:"
+            if len(explanation) > 200:
+                # Keep only the core explanation (200 chars max)
+                sentences = re.split(r'[.!?]', explanation)
+                important_parts = []
+                current_length = 0
+                
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+                    sentence_with_dot = sentence + '.' if not sentence.endswith('.') else sentence
+                    
+                    if current_length + len(sentence_with_dot) <= 200:
+                        important_parts.append(sentence)
+                        current_length += len(sentence_with_dot)
+                    else:
+                        # Try to add partial sentence if it fits
+                        words = sentence.split()
+                        partial_sentence = []
+                        for word in words:
+                            if current_length + len(word) + 1 <= 200:
+                                partial_sentence.append(word)
+                                current_length += len(word) + 1
+                            else:
+                                break
+                        if partial_sentence:
+                            important_parts.append(' '.join(partial_sentence))
+                        break
+                
+                if important_parts:
+                    optimized_explanation = '. '.join(important_parts)
+                    # Ensure it ends with proper punctuation
+                    if optimized_explanation and not optimized_explanation.endswith(('.', '!', '?')):
+                        optimized_explanation += '.'
+                    optimized_lines.append(f"Ex: {optimized_explanation}")
+                else:
+                    # Fallback: take first 200 characters that end at word boundary
+                    if len(explanation) > 200:
+                        last_space = explanation[:200].rfind(' ')
+                        if last_space > 150:  # Ensure we keep reasonable length
+                            optimized_lines.append(f"Ex: {explanation[:last_space]}")
+                        else:
+                            optimized_lines.append(f"Ex: {explanation[:200]}")
+                    else:
+                        optimized_lines.append(line)
+            else:
+                optimized_lines.append(line)
+                
+        # Handle option lines (a), b), c), d)) - keep under 100 chars
+        elif re.match(r'^[a-d]\)', line):
+            option_text = line[3:].strip()  # Remove "a) ", "b) ", etc.
+            if len(option_text) > 100:
+                # Shorten option text intelligently
+                words = option_text.split()
+                shortened = []
+                current_length = 0
+                
+                for word in words:
+                    if current_length + len(word) + 1 <= 100:
+                        shortened.append(word)
+                        current_length += len(word) + 1
+                    else:
+                        break
+                
+                if shortened:
+                    optimized_lines.append(f"{line[:3]}{' '.join(shortened)}")
+                else:
+                    optimized_lines.append(f"{line[:3]}{option_text[:100]}")
+            else:
+                optimized_lines.append(line)
+                
         else:
-            cleaned_lines.append(line)
+            optimized_lines.append(line)
     
-    # Process the last question
-    if current_question:
-        cleaned_lines.extend(process_single_question(current_question))
-    
-    # Remove trailing blank line
-    if cleaned_lines and cleaned_lines[-1] == '':
-        cleaned_lines.pop()
-    
-    return '\n'.join(cleaned_lines)
+    return '\n'.join(optimized_lines)
 
 def process_single_question(question_lines):
     """Process a single question and convert statement numbers"""
@@ -164,75 +247,103 @@ def process_single_question(question_lines):
     
     return processed_lines
 
+def clean_question_format(text: str) -> str:
+    """Clean and format questions to your preferred format with proper statement numbering"""
+    # Remove emojis and extra symbols (keep only ✅ for correct answers)
+    text = re.sub(r'[🔍📝🔑💡🎯🔄📄🖼️🌍📊]', '', text)
+    
+    # Split the text into lines
+    lines = text.split('\n')
+    cleaned_lines = []
+    current_question = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Check if this line starts a new question
+        if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)']):
+            # Process previous question if exists
+            if current_question:
+                cleaned_question = process_single_question(current_question)
+                # Optimize for poll length
+                optimized_question = optimize_for_poll('\n'.join(cleaned_question))
+                cleaned_lines.extend(optimized_question.split('\n'))
+                cleaned_lines.append('')  # Add blank line between questions
+                current_question = []
+            
+            current_question.append(line)
+        elif current_question:
+            current_question.append(line)
+        else:
+            cleaned_lines.append(line)
+    
+    # Process the last question
+    if current_question:
+        cleaned_question = process_single_question(current_question)
+        optimized_question = optimize_for_poll('\n'.join(cleaned_question))
+        cleaned_lines.extend(optimized_question.split('\n'))
+    
+    # Remove trailing blank line
+    if cleaned_lines and cleaned_lines[-1] == '':
+        cleaned_lines.pop()
+    
+    return '\n'.join(cleaned_lines)
+
 def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = True):
     if is_mcq:
         prompt_text = f"""
-        CRITICAL TASK: Extract and reformat ALL multiple-choice questions from this educational PDF with UTMOST ACCURACY.
+        Extract ALL multiple-choice questions from this PDF. Follow STRICTLY:
 
-        🔷 **CONTENT PRESERVATION RULES:**
-        1. PRESERVE ORIGINAL LANGUAGE: Keep question text and options EXACTLY as in PDF
-        2. EXPLANATIONS ONLY in {explanation_language}: Translate ONLY the explanations
-        3. MAINTAIN CONTEXT: Don't lose any educational context or nuances
+        CRITICAL TELEGRAM POLL LIMITS:
+        • Question: 4096 characters maximum
+        • Explanation: 200 characters maximum  
+        • Options: ~100 characters each
 
-        🔷 **FORMATTING REQUIREMENTS (STRICT):**
-        [Question Number]. [Original Question Text]
-        a) [Option A]
-        b) [Option B] 
-        c) [Option C]
-        d) [Option D] ✅
-        Ex: [Detailed explanation in {explanation_language} - explain CONCEPTS, RULES, REASONING]
+        FORMAT RULES:
+        1. [Number]. [Question - under 4096 chars]
+        2. a) [Option A - under 100 chars]
+        3. b) [Option B - under 100 chars]
+        4. c) [Option C - under 100 chars] 
+        5. d) [Option D - under 100 chars] ✅
+        6. Ex: [Explanation in {explanation_language} - under 200 chars]
 
-        🔷 **STATEMENT NUMBERING:**
-        - Convert statement numbers (1., 2., 3.) to 1), 2), 3) to avoid conflicts
-        - Keep question numbers as 1., 2., 3.
+        CONTENT RULES:
+        • Keep original question language
+        • Convert 1., 2., 3. → 1), 2), 3) for statements
+        • Explanations must be 1-2 short sentences MAX
+        • Focus on key concept only in explanations
+        • Extract EVERY question
 
-        🔷 **QUALITY CHECKS:**
-        ✓ Extract EVERY single question from the PDF
-        ✓ Maintain original numbering sequence
-        ✓ Verify correct answers match the PDF
-        ✓ Provide DEEP, MEANINGFUL explanations (not just translations)
-        ✓ Handle complex questions with multiple statements properly
-
-        🔷 **EXAMPLES OF EXCELLENT EXPLANATIONS:**
-        ❌ BAD: "This is correct answer"
-        ✅ EXCELLENT: "This is correct because [concept/rules] applies. [Detailed reasoning with educational value]"
-
-        Take your time to ensure 100% accuracy. Quality over speed.
+        Make explanations CONCISE and MEANINGFUL within 200 characters.
         """
     else:
         question_count = 30
         prompt_text = f"""
-        CRITICAL TASK: Generate HIGH-QUALITY educational questions from this PDF content.
+        Create {question_count} educational questions from this PDF.
 
-        🔷 **CONTENT REQUIREMENTS:**
-        1. Generate EXACTLY {question_count} diverse questions
-        2. Base questions on IMPORTANT CONCEPTS from the content
-        3. Questions should test DEEP UNDERSTANDING, not just recall
-        4. Keep questions and options in ORIGINAL LANGUAGE of PDF
-        5. Explanations ONLY in {explanation_language}
+        TELEGRAM POLL LIMITS:
+        • Question: 4096 chars max
+        • Explanation: 200 chars max
+        • Options: ~100 chars each
 
-        🔷 **QUESTION QUALITY STANDARDS:**
-        ✓ Cover different cognitive levels (remember, understand, apply, analyze)
-        ✓ Include variety: factual, conceptual, analytical questions
-        ✓ Ensure options are plausible but distinct
-        ✓ Avoid ambiguous or trick questions
-        ✓ Make explanations EDUCATIONAL and CONCEPTUAL
+        REQUIREMENTS:
+        1. Generate exactly {question_count} questions
+        2. Questions under 4096 characters
+        3. Options under 100 characters  
+        4. Explanations under 200 characters in {explanation_language}
+        5. Keep original language for questions/options
 
-        🔷 **FORMATTING (STRICT):**
-        [Question Number]. [Question Text in Original Language]
-        a) [Option A in Original Language]
-        b) [Option B in Original Language] 
-        c) [Option C in Original Language]
-        d) [Option D in Original Language] ✅
-        Ex: [Comprehensive explanation in {explanation_language} covering concepts, rules, reasoning]
+        FORMAT:
+        [Number]. [Question]
+        a) [Option A]
+        b) [Option B]
+        c) [Option C]
+        d) [Option D] ✅
+        Ex: [Short explanation in {explanation_language}]
 
-        🔷 **EXPLANATION DEPTH:**
-        - Explain WHY the correct answer is right
-        - Explain WHY wrong answers are incorrect
-        - Connect to underlying concepts/principles
-        - Provide educational insights
-
-        Focus on creating valuable learning material. Take time for quality.
+        Ensure ALL content fits Telegram poll limits.
         """
     
     return {
@@ -243,70 +354,61 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = T
             ]
         }],
         "generationConfig": {
-            "temperature": 0.1,  # Low temperature for consistency
-            "topK": 40,
-            "topP": 0.8,
-            "maxOutputTokens": 12288,  # Increased token limit
+            "temperature": 0.1,
+            "maxOutputTokens": 8192,
         }
     }
 
 def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str, is_mcq: bool = True):
     if is_mcq:
         prompt_text = f"""
-        CRITICAL TASK: Extract ALL questions from this educational image with MAXIMUM ACCURACY.
+        Extract ALL questions from this image.
 
-        🔷 **ACCURACY FOCUS:**
-        1. Read text CAREFULLY - don't miss any details
-        2. Preserve EXACT wording from the image
-        3. Maintain original question structure
-        4. Double-check correct answer identification
+        TELEGRAM POLL LIMITS:
+        • Question: 4096 chars max
+        • Explanation: 200 chars max  
+        • Options: ~100 chars each
 
-        🔷 **FORMATTING (STRICT):**
-        [Question Number]. [Original Question Text from Image]
-        a) [Option A from Image]
-        b) [Option B from Image] 
-        c) [Option C from Image]
-        d) [Option D from Image] ✅
-        Ex: [Detailed conceptual explanation in {explanation_language}]
+        RULES:
+        1. Preserve exact text from image
+        2. Explanations under 200 chars in {explanation_language}
+        3. Convert 1., 2., 3. → 1), 2), 3)
+        4. Extract every question
 
-        🔷 **STATEMENT NUMBERING:**
-        - Convert statement numbers (1., 2., 3.) to 1), 2), 3) to avoid conflicts
-        - Keep question numbers as 1., 2., 3.
+        FORMAT:
+        [Number]. [Question]
+        a) [Option A]
+        b) [Option B]
+        c) [Option C]
+        d) [Option D] ✅
+        Ex: [Short explanation in {explanation_language}]
 
-        🔷 **QUALITY ASSURANCE:**
-        ✓ Extract EVERY visible question
-        ✓ Handle poor image quality with care
-        ✓ Verify numbering matches the image
-        ✓ Provide MEANINGFUL explanations, not translations
-
-        Take extra time to ensure no question is missed or misread.
+        Ensure all content fits Telegram limits.
         """
     else:
         question_count = 25
         prompt_text = f"""
-        CRITICAL TASK: Generate HIGH-QUALITY questions from this educational image.
+        Create {question_count} questions from this image.
 
-        🔷 **CONTENT ANALYSIS:**
-        1. Thoroughly analyze ALL educational content in the image
-        2. Identify key concepts, facts, and relationships
-        3. Generate EXACTLY {question_count} diverse questions
-        4. Base questions on the MOST IMPORTANT information
+        TELEGRAM LIMITS:
+        • Question: 4096 chars
+        • Explanation: 200 chars
+        • Options: ~100 chars
 
-        🔷 **QUESTION STANDARDS:**
-        ✓ Test different levels of understanding
-        ✓ Cover various aspects of the content
-        ✓ Ensure logical and educational value
-        ✓ Create plausible distractors
+        Generate {question_count} questions with:
+        - Questions under 4096 characters
+        - Options under 100 characters
+        - Explanations under 200 characters in {explanation_language}
 
-        🔷 **FORMATTING (STRICT):**
-        [Question Number]. [Question Text in Original Language]
-        a) [Option A in Original Language]
-        b) [Option B in Original Language] 
-        c) [Option C in Original Language]
-        d) [Option D in Original Language] ✅
-        Ex: [Comprehensive explanation in {explanation_language} with conceptual depth]
+        FORMAT:
+        [Number]. [Question]
+        a) [Option A] 
+        b) [Option B]
+        c) [Option C]
+        d) [Option D] ✅
+        Ex: [Brief explanation in {explanation_language}]
 
-        Focus on creating truly educational content.
+        Keep all content within Telegram poll limits.
         """
     
     return {
@@ -318,23 +420,21 @@ def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str
         }],
         "generationConfig": {
             "temperature": 0.1,
-            "topK": 40,
-            "topP": 0.8,
-            "maxOutputTokens": 12288,
+            "maxOutputTokens": 8192,
         }
     }
 
 def call_gemini_api(payload):
     for model in GEMINI_MODELS:
         logger.info(f"🔄 Trying model: {model}")
-        for attempt in range(3):  # Increased attempts
+        for attempt in range(2):  # Reduced attempts to save time
             try:
                 url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={GEMINI_API_KEY}"
-                response = requests.post(url, json=payload, timeout=300)  # 5 minutes timeout
+                response = requests.post(url, json=payload, timeout=180)  # Reduced timeout
                 
                 if response.status_code == 404:
-                    logger.warning(f"❌ Model not found: {model}")
-                    continue
+                    logger.warning(f"❌ Model not available: {model}")
+                    break  # Skip to next model if 404
                     
                 response.raise_for_status()
                 data = response.json()
@@ -346,21 +446,22 @@ def call_gemini_api(payload):
                     .get("text", "")
                 )
                 
-                if text.strip() and ("1." in text or "Q1." in text or "Question 1" in text):
+                if text.strip() and ("1." in text or "Q1." in text):
                     logger.info(f"✅ Success with model: {model}")
-                    # Additional quality check
-                    if "Ex:" in text and "✅" in text:
+                    # Relaxed quality check for free tier
+                    if "Ex:" in text or "Explanation" in text:
                         return text
                     else:
-                        logger.warning(f"Model {model} returned incomplete format, trying next...")
-                        continue
+                        # Even if format isn't perfect, return the text and let cleaning handle it
+                        logger.warning(f"Model {model} returned basic format, but will use it")
+                        return text
                     
             except requests.exceptions.Timeout:
                 logger.warning(f"⏰ Timeout on {model}, attempt {attempt + 1}")
-                time.sleep(5)  # Longer wait between attempts
+                time.sleep(3)
             except Exception as e:
                 logger.error(f"❌ Model {model} failed: {str(e)}")
-                time.sleep(3)
+                time.sleep(2)
                 
     return None
 
@@ -406,13 +507,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *Enhanced Features:*
 • Larger PDF support (up to 15MB)
 • Gemini 2.5 Pro for highest quality
+• Automatic Telegram poll optimization
 • Better formatting with statement numbering
-• Higher quality explanations
 
-*Supported Formats:*
-• PDF files (≤15MB)
-• Images: JPG, JPEG, PNG, WEBP, BMP, TIFF, HEIC
-• Telegram photos & forwards
+*Telegram Poll Ready:*
+• Questions auto-optimized for 4096 char limit
+• Explanations auto-optimized for 200 char limit
+• Options auto-optimized for 100 char limit
 
 *Current Limits:*
 • PDF: ≤15MB
@@ -457,11 +558,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Image Limit: {MAX_IMAGE_SIZE_MB}MB
 • Max Images: {MAX_IMAGES}
 
+*Telegram Poll Optimization:*
+• Questions: ≤4096 characters
+• Explanations: ≤200 characters  
+• Options: ≤100 characters
+
 *Available Models:*
 {", ".join(GEMINI_MODELS[:3])}
-
-*Supported Image Formats:*
-{", ".join(SUPPORTED_IMAGE_TYPES)}
     """
     await safe_reply(update, status_text)
 
@@ -472,7 +575,7 @@ async def pdf_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, 
         f"📄 Send me a PDF file (≤{MAX_PDF_SIZE_MB}MB)\n\n"
         f"*Enhanced processing with Gemini 2.5 Pro*\n"
-        f"*Better quality & accuracy*\n\n"
+        f"*Automatic Telegram poll optimization*\n\n"
         f"After sending, choose:\n"
         f"• /mcq - for question papers (extracts all)\n"
         f"• /content - for textbooks (generates questions)"
@@ -512,7 +615,8 @@ async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_image"] = True
     await safe_reply(update,
         f"🖼️ Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n\n"
-        f"*Enhanced processing with Gemini 2.5 Pro*\n\n"
+        f"*Enhanced processing with Gemini 2.5 Pro*\n"
+        f"*Automatic Telegram poll optimization*\n\n"
         f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
         f"*Also works with:* Telegram photos & forwarded images\n\n"
         f"After sending, choose:\n"
@@ -526,7 +630,8 @@ async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["collected_images"] = []
     await safe_reply(update,
         f"🖼️ Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n\n"
-        f"*Enhanced processing with Gemini 2.5 Pro*\n\n"
+        f"*Enhanced processing with Gemini 2.5 Pro*\n"
+        f"*Automatic Telegram poll optimization*\n\n"
         f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
         f"*Also works with:* Telegram photos & forwarded images\n\n"
         f"Send /done when finished, then choose:\n"
@@ -629,7 +734,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_p
                 f"🔄 Processing MCQ PDF ({file_size:.1f}MB)...\n"
                 f"⏰ Estimated time: {time_estimate}\n"
                 f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
-                f"📝 Extracting ALL questions with enhanced quality..."
+                f"📝 Extracting ALL questions with Telegram poll optimization..."
             )
         else:
             time_estimate = "3-7 minutes" if file_size > 5 else "2-5 minutes"
@@ -637,7 +742,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_p
                 f"🔄 Processing content PDF ({file_size:.1f}MB)...\n"
                 f"⏰ Estimated time: {time_estimate}\n"
                 f"🎯 Using Gemini 2.5 Pro for best quality\n"
-                f"📝 Generating high-quality educational questions..."
+                f"📝 Generating Telegram-poll-optimized questions..."
             )
         
         data_b64 = stream_b64_encode(file_path)
@@ -662,7 +767,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_p
             txt_path = f.name
         
         action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} {question_count} questions with enhanced quality", txt_path)
+        await safe_reply(update, f"✅ Successfully {action} {question_count} Telegram-poll-ready questions", txt_path)
         
     except Exception as e:
         logger.error(f"PDF processing error: {e}")
@@ -687,13 +792,13 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
             await safe_reply(update, 
                 f"🔄 Processing MCQ image...\n"
                 f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
-                f"📝 Extracting ALL questions with enhanced quality"
+                f"📝 Extracting Telegram-poll-optimized questions..."
             )
         else:
             await safe_reply(update, 
                 f"🔄 Processing content image...\n"
                 f"🎯 Using Gemini 2.5 Pro for best quality\n"
-                f"📝 Generating high-quality educational questions"
+                f"📝 Generating Telegram-poll-ready questions..."
             )
         
         data_b64 = stream_b64_encode(image_path)
@@ -720,7 +825,7 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
             txt_path = f.name
         
         action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} {question_count} questions from image with enhanced quality", txt_path)
+        await safe_reply(update, f"✅ Successfully {action} {question_count} Telegram-poll-ready questions from image", txt_path)
         
     except Exception as e:
         logger.error(f"Image processing error: {e}")
@@ -750,13 +855,13 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
             await safe_reply(update, 
                 f"🔄 Processing {len(images)} MCQ images...\n"
                 f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
-                f"📝 Extracting ALL questions with enhanced quality"
+                f"📝 Extracting Telegram-poll-optimized questions..."
             )
         else:
             await safe_reply(update, 
                 f"🔄 Processing {len(images)} content images...\n"
                 f"🎯 Using Gemini 2.5 Pro for best quality\n"
-                f"📝 Generating high-quality educational questions"
+                f"📝 Generating Telegram-poll-ready questions..."
             )
         
         # Process first image
@@ -785,7 +890,7 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
             txt_path = f.name
         
         action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} {question_count} questions from {len(images)} images with enhanced quality", txt_path)
+        await safe_reply(update, f"✅ Successfully {action} {question_count} Telegram-poll-ready questions from {len(images)} images", txt_path)
         
     except Exception as e:
         logger.error(f"Multiple images processing error: {e}")
@@ -879,7 +984,7 @@ def run_bot():
         filters.Document.ALL | filters.PHOTO, handle_file
     ))
     
-    logger.info("Starting Enhanced OCR Bot with Gemini 2.5 Pro support...")
+    logger.info("Starting Enhanced OCR Bot with Telegram Poll Optimization...")
     
     # Run Flask in separate thread
     from threading import Thread
