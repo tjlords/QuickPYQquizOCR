@@ -36,8 +36,17 @@ SUPPORTED_LANGUAGES = {
     "gujarati": "Gujarati"
 }
 
-# Supported image formats
-SUPPORTED_IMAGE_TYPES = [".jpg", ".jpeg", ".png", ".webp"]
+# Supported image formats - Common formats
+SUPPORTED_IMAGE_TYPES = [
+    ".jpg", ".jpeg", ".png", ".webp", 
+    ".bmp", ".tiff", ".tif", ".heic", ".heif"
+]
+
+# Supported MIME types
+SUPPORTED_MIME_TYPES = [
+    "image/jpeg", "image/jpg", "image/png", "image/webp",
+    "image/bmp", "image/tiff", "image/heic", "image/heif"
+]
 
 # ---------------- FLASK APP ----------------
 flask_app = Flask(__name__)
@@ -77,6 +86,22 @@ def stream_b64_encode(file_path: str) -> str:
     with open(file_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
+def get_mime_type(file_path: str) -> str:
+    """Get MIME type from file extension"""
+    ext = Path(file_path).suffix.lower()
+    mime_map = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.bmp': 'image/bmp',
+        '.tiff': 'image/tiff',
+        '.tif': 'image/tiff',
+        '.heic': 'image/heic',
+        '.heif': 'image/heif'
+    }
+    return mime_map.get(ext, 'image/jpeg')
+
 def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = True):
     if is_mcq:
         prompt_text = f"""
@@ -101,22 +126,6 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = T
         8. For explanations: Explain the CONCEPT/RULE/REASONING, not just translate
         9. Place the ✅ symbol IMMEDIATELY AFTER the correct option
         10. Make explanations EDUCATIONAL - explain the grammar rule, logic, or concept
-
-        EXAMPLE OF CORRECT FORMAT:
-        1. વાક્યમાં કૃદંતનો પ્રકાર જણાવો: 'હું ખાવા માટે આવ્યો જ નથી.'
-        a) હેત્વર્થ કૃદંત ✅
-        b) સામાન્ય કૃદંત
-        c) સંબંધક કૃદંત
-        d) ભૂત કૃદંત
-        Ex: 'ખાવા માટે' એ ક્રિયાનો હેતુ દર્શાવે છે. હેત્વર્થ કૃદંતમાં 'માટે' પ્રત્યય લાગે છે અને તે ક્રિયાના ઉદ્દેશ્યને દર્શાવે છે.
-
-        EXAMPLE OF CORRECT FORMAT:
-        1. If she does not work she ________
-        a) Will be failed
-        b) Will not fail
-        c) Fails
-        d) Will fail ✅
-        Ex: આ future simple tenseનું વાક્ય છે. Negative condition પછી future simple tense માં 'will + verb' આવે છે.
 
         STRICTLY FOLLOW THIS EXACT FORMAT FOR EVERY QUESTION.
         """
@@ -291,6 +300,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /mcq - Extract all questions (for question papers)
 /content - Generate questions (for textbooks)
 
+*Supported Formats:*
+• PDF files
+• Images: JPG, JPEG, PNG, WEBP, BMP, TIFF, HEIC
+• Telegram photos & forwards
+
 *Current Limits:*
 • PDF: ≤5MB
 • Images: ≤3MB each, max 10 images
@@ -333,6 +347,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • PDF Limit: {MAX_PDF_SIZE_MB}MB
 • Image Limit: {MAX_IMAGE_SIZE_MB}MB
 • Max Images: {MAX_IMAGES}
+
+*Supported Image Formats:*
+{", ".join(SUPPORTED_IMAGE_TYPES)}
     """
     await safe_reply(update, status_text)
 
@@ -356,6 +373,8 @@ async def mcq_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.user_data.get("current_image"):
         image_path = context.user_data["current_image"]
         await process_single_image(update, context, image_path, is_mcq=True)
+    elif context.user_data.get("collected_images"):
+        await process_multiple_images(update, context, is_mcq=True)
     else:
         await safe_reply(update, "❌ No file found. Please send a file first.")
 
@@ -368,6 +387,8 @@ async def content_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.user_data.get("current_image"):
         image_path = context.user_data["current_image"]
         await process_single_image(update, context, image_path, is_mcq=False)
+    elif context.user_data.get("collected_images"):
+        await process_multiple_images(update, context, is_mcq=False)
     else:
         await safe_reply(update, "❌ No file found. Please send a file first.")
 
@@ -377,6 +398,8 @@ async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_image"] = True
     await safe_reply(update,
         f"🖼️ Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n\n"
+        f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
+        f"*Also works with:* Telegram photos & forwarded images\n\n"
         f"After sending, choose:\n"
         f"• /mcq - for question images (extracts all)\n"
         f"• /content - for content images (generates questions)"
@@ -388,6 +411,8 @@ async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["collected_images"] = []
     await safe_reply(update,
         f"🖼️ Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n\n"
+        f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
+        f"*Also works with:* Telegram photos & forwarded images\n\n"
         f"Send /done when finished, then choose:\n"
         f"• /mcq - for question images\n"
         f"• /content - for content images"
@@ -426,10 +451,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Download file
             await update.message.reply_text("📥 Downloading PDF...")
-            fobj = await file.get_file()
+            file_obj = await file.get_file()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 pdf_path = tmp_file.name
-            await fobj.download_to_drive(pdf_path)
+            await file_obj.download_to_drive(pdf_path)
             
             context.user_data["current_file"] = pdf_path
             context.user_data["awaiting_pdf"] = False
@@ -535,7 +560,7 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
             await safe_reply(update, f"🔄 Processing content image... Generating questions")
         
         data_b64 = stream_b64_encode(image_path)
-        mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
+        mime_type = get_mime_type(image_path)
         
         payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
         result = call_gemini_api(payload)
@@ -592,7 +617,7 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
         # Process first image
         image_path = images[0]
         data_b64 = stream_b64_encode(image_path)
-        mime_type = "image/jpeg" if image_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
+        mime_type = get_mime_type(image_path)
         
         payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
         result = call_gemini_api(payload)
@@ -651,30 +676,36 @@ async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg)
 
 async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
     try:
+        file = None
+        ext = ".jpg"  # Default extension
+        
         if msg.document:
-            file = msg.document
-            ext = Path(file.file_name).suffix.lower()
+            file_obj = msg.document
+            ext = Path(file_obj.file_name).suffix.lower()
             if ext not in SUPPORTED_IMAGE_TYPES:
                 await safe_reply(update, f"❌ Unsupported image format. Use: {', '.join(SUPPORTED_IMAGE_TYPES)}")
                 return None
                 
-            if file.file_size > MAX_IMAGE_SIZE_MB * 1024 * 1024:
+            if file_obj.file_size > MAX_IMAGE_SIZE_MB * 1024 * 1024:
                 await safe_reply(update, f"❌ Image too large. Max {MAX_IMAGE_SIZE_MB}MB")
                 return None
                 
-            fobj = await file.get_file()
+            file = await file_obj.get_file()
             
         elif msg.photo:
-            # Get the largest photo size
-            file = msg.photo[-1].get_file()
+            # Get the largest photo size (works with forwarded photos too)
+            file_obj = msg.photo[-1]
+            file = await file_obj.get_file()
             ext = ".jpg"
         else:
             return None
         
+        # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
             image_path = tmp_file.name
         
-        await fobj.download_to_drive(image_path)
+        # Download the file
+        await file.download_to_drive(image_path)
         return image_path
         
     except Exception as e:
@@ -683,19 +714,35 @@ async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg
         return None
 
 def clean_question_format(text: str) -> str:
-    """Clean and format questions to your preferred format"""
+    """Clean and format questions to your preferred format with proper numbering"""
     # Remove emojis and extra symbols (keep only ✅ for correct answers)
     text = re.sub(r'[🔍📝🔑💡🎯🔄📄🖼️🌍📊]', '', text)
     
-    # Ensure proper formatting
+    # Split the text into lines
     lines = text.split('\n')
     cleaned_lines = []
+    in_question_body = False
     
     for line in lines:
         line = line.strip()
-        if line:
-            # Fix numbering format
-            line = re.sub(r'^(Q\d+\.|Question\s*\d+:)', lambda m: m.group(1).split('.')[0].replace('Question', '').replace(' ', '') + '.', line)
+        if not line:
+            continue
+            
+        # Detect if this is a question number line
+        if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)']):
+            # This is a question number line
+            if in_question_body and cleaned_lines:
+                # Add blank line before new question
+                cleaned_lines.append('')
+            in_question_body = True
+            cleaned_lines.append(line)
+        elif in_question_body:
+            # This is part of a question body
+            # Convert statement numbers (1., 2., 3.) to 1), 2), 3)
+            if re.search(r'\b\d+\.\s', line) and not line.startswith(('a)', 'b)', 'c)', 'd)', 'Ex:')):
+                line = re.sub(r'(\b)(\d+)\.(\s)', r'\1\2)\3', line)
+            cleaned_lines.append(line)
+        else:
             cleaned_lines.append(line)
     
     return '\n'.join(cleaned_lines)
