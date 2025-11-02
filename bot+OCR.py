@@ -21,13 +21,15 @@ MAX_IMAGE_SIZE_MB = 5  # Increased from 3MB to 5MB
 MAX_IMAGES = 10
 PROCESSING_TIMEOUT = 300  # 5 minutes timeout for large files
 
-# Gemini models - including 2.5 Pro for best quality
+# Your working Gemini models from testing
 GEMINI_MODELS = [
-    "gemini-2.5-pro-preview-03-25",  # Latest 2.5 Pro for highest quality
-    "gemini-2.0-flash-exp",          # Experimental for complex tasks
-    "gemini-1.5-pro",                # Reliable pro model
-    "gemini-1.5-flash",              # Fast and capable
-    "gemini-2.0-flash"               # Standard flash model
+    "gemini-2.5-pro",           # Best quality - will be used first
+    "gemini-2.5-flash",         # Fast and high quality
+    "gemini-2.5-flash-lite",    # Lightweight but capable
+    "gemini-2.0-flash",         # Reliable flash model
+    "gemini-2.0-flash-001",     # Alternative version
+    "gemini-2.0-flash-lite",    # Lightweight option
+    "gemini-2.0-flash-lite-001", # Alternative lightweight
 ]
 
 # Explanation languages only
