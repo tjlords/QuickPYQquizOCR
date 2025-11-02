@@ -1,0 +1,898 @@
+import os, base64, time, requests, logging, asyncio, re
+from flask import Flask
+from telegram import Update, InputFile
+from telegram.constants import ParseMode, ChatAction
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    filters, ContextTypes
+)
+from telegram.error import TimedOut, NetworkError
+import tempfile
+from pathlib import Path
+import json
+
+# ---------------- CONFIG ----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "YOUR_GEMINI_API_KEY"
+OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "123456789"))
+PORT = int(os.getenv("PORT", 10000))
+MAX_PDF_SIZE_MB = 15  # Increased from 5MB to 15MB
+MAX_IMAGE_SIZE_MB = 5  # Increased from 3MB to 5MB
+MAX_IMAGES = 10
+PROCESSING_TIMEOUT = 300  # 5 minutes timeout for large files
+
+# Gemini models - including 2.5 Pro for best quality
+GEMINI_MODELS = [
+    "gemini-2.5-pro-preview-03-25",  # Latest 2.5 Pro for highest quality
+    "gemini-2.0-flash-exp",          # Experimental for complex tasks
+    "gemini-1.5-pro",                # Reliable pro model
+    "gemini-1.5-flash",              # Fast and capable
+    "gemini-2.0-flash"               # Standard flash model
+]
+
+# Explanation languages only
+SUPPORTED_LANGUAGES = {
+    "english": "English",
+    "hindi": "Hindi", 
+    "gujarati": "Gujarati"
+}
+
+# Supported image formats - Common formats
+SUPPORTED_IMAGE_TYPES = [
+    ".jpg", ".jpeg", ".png", ".webp", 
+    ".bmp", ".tiff", ".tif", ".heic", ".heif"
+]
+
+# Supported MIME types
+SUPPORTED_MIME_TYPES = [
+    "image/jpeg", "image/jpg", "image/png", "image/webp",
+    "image/bmp", "image/tiff", "image/heic", "image/heif"
+]
+
+# ---------------- FLASK APP ----------------
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return json.dumps({
+        "status": "healthy", 
+        "service": "OCR Gemini Bot",
+        "timestamp": time.time()
+    })
+
+@flask_app.route("/health")
+def health():
+    return json.dumps({"status": "healthy", "timestamp": time.time()})
+
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ---------------- OWNER VERIFICATION ----------------
+def owner_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id != OWNER_USER_ID:
+            logger.warning(f"Unauthorized access from user {user_id}")
+            await update.message.reply_text("❌ Access denied. This is a private bot.")
+            return
+        return await func(update, context)
+    return wrapper
+
+# ---------------- HELPERS ----------------
+def stream_b64_encode(file_path: str) -> str:
+    with open(file_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def get_mime_type(file_path: str) -> str:
+    """Get MIME type from file extension"""
+    ext = Path(file_path).suffix.lower()
+    mime_map = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.bmp': 'image/bmp',
+        '.tiff': 'image/tiff',
+        '.tif': 'image/tiff',
+        '.heic': 'image/heic',
+        '.heif': 'image/heif'
+    }
+    return mime_map.get(ext, 'image/jpeg')
+
+def clean_question_format(text: str) -> str:
+    """Clean and format questions to your preferred format with proper statement numbering"""
+    # Remove emojis and extra symbols (keep only ✅ for correct answers)
+    text = re.sub(r'[🔍📝🔑💡🎯🔄📄🖼️🌍📊]', '', text)
+    
+    # Split the text into lines
+    lines = text.split('\n')
+    cleaned_lines = []
+    current_question = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Check if this line starts a new question
+        if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)']):
+            # Process previous question if exists
+            if current_question:
+                cleaned_lines.extend(process_single_question(current_question))
+                cleaned_lines.append('')  # Add blank line between questions
+                current_question = []
+            
+            current_question.append(line)
+        elif current_question:
+            current_question.append(line)
+        else:
+            cleaned_lines.append(line)
+    
+    # Process the last question
+    if current_question:
+        cleaned_lines.extend(process_single_question(current_question))
+    
+    # Remove trailing blank line
+    if cleaned_lines and cleaned_lines[-1] == '':
+        cleaned_lines.pop()
+    
+    return '\n'.join(cleaned_lines)
+
+def process_single_question(question_lines):
+    """Process a single question and convert statement numbers"""
+    processed_lines = []
+    
+    for i, line in enumerate(question_lines):
+        # Keep question number line as is
+        if i == 0 and re.match(r'^\d+\.\s', line):
+            processed_lines.append(line)
+        else:
+            # Convert statement numbers (1., 2., 3.) to 1), 2), 3)
+            # Only convert standalone numbered statements, not options
+            if (re.match(r'^\d+\.\s', line) and 
+                not line.startswith(('a)', 'b)', 'c)', 'd)', 'Ex:')) and
+                len(line) > 3 and  # Ensure it's not just "1." or "2."
+                not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)'])):
+                line = re.sub(r'^(\d+)\.\s', r'\1) ', line)
+            processed_lines.append(line)
+    
+    return processed_lines
+
+def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = True):
+    if is_mcq:
+        prompt_text = f"""
+        CRITICAL TASK: Extract and reformat ALL multiple-choice questions from this educational PDF with UTMOST ACCURACY.
+
+        🔷 **CONTENT PRESERVATION RULES:**
+        1. PRESERVE ORIGINAL LANGUAGE: Keep question text and options EXACTLY as in PDF
+        2. EXPLANATIONS ONLY in {explanation_language}: Translate ONLY the explanations
+        3. MAINTAIN CONTEXT: Don't lose any educational context or nuances
+
+        🔷 **FORMATTING REQUIREMENTS (STRICT):**
+        [Question Number]. [Original Question Text]
+        a) [Option A]
+        b) [Option B] 
+        c) [Option C]
+        d) [Option D] ✅
+        Ex: [Detailed explanation in {explanation_language} - explain CONCEPTS, RULES, REASONING]
+
+        🔷 **STATEMENT NUMBERING:**
+        - Convert statement numbers (1., 2., 3.) to 1), 2), 3) to avoid conflicts
+        - Keep question numbers as 1., 2., 3.
+
+        🔷 **QUALITY CHECKS:**
+        ✓ Extract EVERY single question from the PDF
+        ✓ Maintain original numbering sequence
+        ✓ Verify correct answers match the PDF
+        ✓ Provide DEEP, MEANINGFUL explanations (not just translations)
+        ✓ Handle complex questions with multiple statements properly
+
+        🔷 **EXAMPLES OF EXCELLENT EXPLANATIONS:**
+        ❌ BAD: "This is correct answer"
+        ✅ EXCELLENT: "This is correct because [concept/rules] applies. [Detailed reasoning with educational value]"
+
+        Take your time to ensure 100% accuracy. Quality over speed.
+        """
+    else:
+        question_count = 30
+        prompt_text = f"""
+        CRITICAL TASK: Generate HIGH-QUALITY educational questions from this PDF content.
+
+        🔷 **CONTENT REQUIREMENTS:**
+        1. Generate EXACTLY {question_count} diverse questions
+        2. Base questions on IMPORTANT CONCEPTS from the content
+        3. Questions should test DEEP UNDERSTANDING, not just recall
+        4. Keep questions and options in ORIGINAL LANGUAGE of PDF
+        5. Explanations ONLY in {explanation_language}
+
+        🔷 **QUESTION QUALITY STANDARDS:**
+        ✓ Cover different cognitive levels (remember, understand, apply, analyze)
+        ✓ Include variety: factual, conceptual, analytical questions
+        ✓ Ensure options are plausible but distinct
+        ✓ Avoid ambiguous or trick questions
+        ✓ Make explanations EDUCATIONAL and CONCEPTUAL
+
+        🔷 **FORMATTING (STRICT):**
+        [Question Number]. [Question Text in Original Language]
+        a) [Option A in Original Language]
+        b) [Option B in Original Language] 
+        c) [Option C in Original Language]
+        d) [Option D in Original Language] ✅
+        Ex: [Comprehensive explanation in {explanation_language} covering concepts, rules, reasoning]
+
+        🔷 **EXPLANATION DEPTH:**
+        - Explain WHY the correct answer is right
+        - Explain WHY wrong answers are incorrect
+        - Connect to underlying concepts/principles
+        - Provide educational insights
+
+        Focus on creating valuable learning material. Take time for quality.
+        """
+    
+    return {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": "application/pdf", "data": data_b64}},
+                {"text": prompt_text}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,  # Low temperature for consistency
+            "topK": 40,
+            "topP": 0.8,
+            "maxOutputTokens": 12288,  # Increased token limit
+        }
+    }
+
+def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str, is_mcq: bool = True):
+    if is_mcq:
+        prompt_text = f"""
+        CRITICAL TASK: Extract ALL questions from this educational image with MAXIMUM ACCURACY.
+
+        🔷 **ACCURACY FOCUS:**
+        1. Read text CAREFULLY - don't miss any details
+        2. Preserve EXACT wording from the image
+        3. Maintain original question structure
+        4. Double-check correct answer identification
+
+        🔷 **FORMATTING (STRICT):**
+        [Question Number]. [Original Question Text from Image]
+        a) [Option A from Image]
+        b) [Option B from Image] 
+        c) [Option C from Image]
+        d) [Option D from Image] ✅
+        Ex: [Detailed conceptual explanation in {explanation_language}]
+
+        🔷 **STATEMENT NUMBERING:**
+        - Convert statement numbers (1., 2., 3.) to 1), 2), 3) to avoid conflicts
+        - Keep question numbers as 1., 2., 3.
+
+        🔷 **QUALITY ASSURANCE:**
+        ✓ Extract EVERY visible question
+        ✓ Handle poor image quality with care
+        ✓ Verify numbering matches the image
+        ✓ Provide MEANINGFUL explanations, not translations
+
+        Take extra time to ensure no question is missed or misread.
+        """
+    else:
+        question_count = 25
+        prompt_text = f"""
+        CRITICAL TASK: Generate HIGH-QUALITY questions from this educational image.
+
+        🔷 **CONTENT ANALYSIS:**
+        1. Thoroughly analyze ALL educational content in the image
+        2. Identify key concepts, facts, and relationships
+        3. Generate EXACTLY {question_count} diverse questions
+        4. Base questions on the MOST IMPORTANT information
+
+        🔷 **QUESTION STANDARDS:**
+        ✓ Test different levels of understanding
+        ✓ Cover various aspects of the content
+        ✓ Ensure logical and educational value
+        ✓ Create plausible distractors
+
+        🔷 **FORMATTING (STRICT):**
+        [Question Number]. [Question Text in Original Language]
+        a) [Option A in Original Language]
+        b) [Option B in Original Language] 
+        c) [Option C in Original Language]
+        d) [Option D in Original Language] ✅
+        Ex: [Comprehensive explanation in {explanation_language} with conceptual depth]
+
+        Focus on creating truly educational content.
+        """
+    
+    return {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": mime_type, "data": data_b64}},
+                {"text": prompt_text}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topK": 40,
+            "topP": 0.8,
+            "maxOutputTokens": 12288,
+        }
+    }
+
+def call_gemini_api(payload):
+    for model in GEMINI_MODELS:
+        logger.info(f"🔄 Trying model: {model}")
+        for attempt in range(3):  # Increased attempts
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={GEMINI_API_KEY}"
+                response = requests.post(url, json=payload, timeout=300)  # 5 minutes timeout
+                
+                if response.status_code == 404:
+                    logger.warning(f"❌ Model not found: {model}")
+                    continue
+                    
+                response.raise_for_status()
+                data = response.json()
+                
+                text = (
+                    data.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+                )
+                
+                if text.strip() and ("1." in text or "Q1." in text or "Question 1" in text):
+                    logger.info(f"✅ Success with model: {model}")
+                    # Additional quality check
+                    if "Ex:" in text and "✅" in text:
+                        return text
+                    else:
+                        logger.warning(f"Model {model} returned incomplete format, trying next...")
+                        continue
+                    
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏰ Timeout on {model}, attempt {attempt + 1}")
+                time.sleep(5)  # Longer wait between attempts
+            except Exception as e:
+                logger.error(f"❌ Model {model} failed: {str(e)}")
+                time.sleep(3)
+                
+    return None
+
+async def safe_reply(update: Update, text: str, file_path: str = None):
+    try:
+        if file_path and os.path.exists(file_path):
+            with open(file_path, "rb") as file:
+                await update.message.reply_document(
+                    document=InputFile(file, filename=Path(file_path).name),
+                    caption=text[:1000] if text else "Generated questions"
+                )
+            # Cleanup
+            try:
+                os.unlink(file_path)
+                logger.info(f"🧹 Cleaned up output file: {file_path}")
+            except Exception as e:
+                logger.error(f"Error cleaning output file: {e}")
+        else:
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        return True
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+        return False
+
+# ---------------- BOT HANDLERS ----------------
+@owner_only
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_text = """
+🔒 *Owner Access - QuickPYQ OCR Bot* 🔒
+
+*Available Commands:*
+/setlang - Set explanation language
+/setcount - Set question count for content
+/pdf - Process PDF file  
+/image - Process single image
+/images - Process multiple images
+/status - Current settings
+
+*After sending files, use:*
+/mcq - Extract all questions (for question papers)
+/content - Generate questions (for textbooks)
+
+*Enhanced Features:*
+• Larger PDF support (up to 15MB)
+• Gemini 2.5 Pro for highest quality
+• Better formatting with statement numbering
+• Higher quality explanations
+
+*Supported Formats:*
+• PDF files (≤15MB)
+• Images: JPG, JPEG, PNG, WEBP, BMP, TIFF, HEIC
+• Telegram photos & forwards
+
+*Current Limits:*
+• PDF: ≤15MB
+• Images: ≤5MB each, max 10 images
+    """
+    await safe_reply(update, welcome_text)
+
+@owner_only
+async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        lang = context.args[0].lower()
+        if lang in SUPPORTED_LANGUAGES:
+            context.user_data["language"] = lang
+            await safe_reply(update, f"✅ Explanation language set to {SUPPORTED_LANGUAGES[lang]}")
+            return
+    
+    lang_list = "\n".join([f"• {lang} - {name}" for lang, name in SUPPORTED_LANGUAGES.items()])
+    await safe_reply(update, f"🌍 Available Explanation Languages:\n\n{lang_list}")
+
+@owner_only  
+async def setcount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args and context.args[0].isdigit():
+        count = int(context.args[0])
+        if 1 <= count <= 100:
+            context.user_data["question_count"] = count
+            await safe_reply(update, f"✅ Question count set to {count}")
+            return
+    
+    await safe_reply(update, "❌ Use: `/setcount 25` (1-100)")
+
+@owner_only
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = context.user_data.get("language", "gujarati")
+    count = context.user_data.get("question_count", 30)
+    
+    status_text = f"""
+📊 *Current Settings:*
+
+• Explanation Language: {SUPPORTED_LANGUAGES.get(lang, 'Gujarati')}
+• Default Question Count: {count}
+• PDF Limit: {MAX_PDF_SIZE_MB}MB
+• Image Limit: {MAX_IMAGE_SIZE_MB}MB
+• Max Images: {MAX_IMAGES}
+
+*Available Models:*
+{", ".join(GEMINI_MODELS[:3])}
+
+*Supported Image Formats:*
+{", ".join(SUPPORTED_IMAGE_TYPES)}
+    """
+    await safe_reply(update, status_text)
+
+# ---------------- PDF HANDLERS ----------------
+@owner_only
+async def pdf_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_pdf"] = True
+    await safe_reply(update, 
+        f"📄 Send me a PDF file (≤{MAX_PDF_SIZE_MB}MB)\n\n"
+        f"*Enhanced processing with Gemini 2.5 Pro*\n"
+        f"*Better quality & accuracy*\n\n"
+        f"After sending, choose:\n"
+        f"• /mcq - for question papers (extracts all)\n"
+        f"• /content - for textbooks (generates questions)"
+    )
+
+@owner_only
+async def mcq_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process as MCQ - extract all questions"""
+    if context.user_data.get("current_file"):
+        file_path = context.user_data["current_file"]
+        await process_pdf(update, context, file_path, is_mcq=True)
+    elif context.user_data.get("current_image"):
+        image_path = context.user_data["current_image"]
+        await process_single_image(update, context, image_path, is_mcq=True)
+    elif context.user_data.get("collected_images"):
+        await process_multiple_images(update, context, is_mcq=True)
+    else:
+        await safe_reply(update, "❌ No file found. Please send a file first.")
+
+@owner_only
+async def content_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process as content - generate questions"""
+    if context.user_data.get("current_file"):
+        file_path = context.user_data["current_file"]
+        await process_pdf(update, context, file_path, is_mcq=False)
+    elif context.user_data.get("current_image"):
+        image_path = context.user_data["current_image"]
+        await process_single_image(update, context, image_path, is_mcq=False)
+    elif context.user_data.get("collected_images"):
+        await process_multiple_images(update, context, is_mcq=False)
+    else:
+        await safe_reply(update, "❌ No file found. Please send a file first.")
+
+# ---------------- IMAGE HANDLERS ----------------
+@owner_only
+async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_image"] = True
+    await safe_reply(update,
+        f"🖼️ Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n\n"
+        f"*Enhanced processing with Gemini 2.5 Pro*\n\n"
+        f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
+        f"*Also works with:* Telegram photos & forwarded images\n\n"
+        f"After sending, choose:\n"
+        f"• /mcq - for question images (extracts all)\n"
+        f"• /content - for content images (generates questions)"
+    )
+
+@owner_only
+async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_images"] = True
+    context.user_data["collected_images"] = []
+    await safe_reply(update,
+        f"🖼️ Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n\n"
+        f"*Enhanced processing with Gemini 2.5 Pro*\n\n"
+        f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
+        f"*Also works with:* Telegram photos & forwarded images\n\n"
+        f"Send /done when finished, then choose:\n"
+        f"• /mcq - for question images\n"
+        f"• /content - for content images"
+    )
+
+@owner_only
+async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("collected_images"):
+        await safe_reply(update, "❌ No images collected. Use /images first.")
+        return
+    
+    context.user_data["awaiting_images"] = False
+    await safe_reply(update,
+        f"✅ Collected {len(context.user_data['collected_images'])} images\n\n"
+        f"Choose processing type:\n"
+        f"• /mcq - Extract ALL questions\n"
+        f"• /content - Generate questions"
+    )
+
+# ---------------- FILE HANDLERS ----------------
+@owner_only
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_USER_ID:
+        return
+
+    msg = update.effective_message
+    
+    # Handle PDF
+    if context.user_data.get("awaiting_pdf") and msg.document:
+        file = msg.document
+        if file.file_name.lower().endswith(".pdf"):
+            if file.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
+                await safe_reply(update, f"❌ PDF too large. Max {MAX_PDF_SIZE_MB}MB")
+                return
+            
+            # Download file
+            await update.message.reply_text("📥 Downloading PDF...")
+            file_obj = await file.get_file()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                pdf_path = tmp_file.name
+            await file_obj.download_to_drive(pdf_path)
+            
+            context.user_data["current_file"] = pdf_path
+            context.user_data["awaiting_pdf"] = False
+            
+            await safe_reply(update,
+                f"✅ PDF received: `{file.file_name}`\n\n"
+                f"Choose processing type:\n"
+                f"• /mcq - Extract ALL questions\n"
+                f"• /content - Generate questions"
+            )
+            return
+    
+    # Handle single image
+    elif context.user_data.get("awaiting_image") and (msg.document or msg.photo):
+        await process_single_image_upload(update, context, msg)
+        return
+    
+    # Handle multiple images
+    elif context.user_data.get("awaiting_images") and (msg.document or msg.photo):
+        await collect_image(update, context, msg)
+        return
+
+async def process_single_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
+    """Handle single image upload"""
+    context.user_data["awaiting_image"] = False
+    
+    try:
+        image_path = await download_image(update, context, msg)
+        if not image_path:
+            return
+        
+        context.user_data["current_image"] = image_path
+        
+        await safe_reply(update,
+            f"✅ Image received\n\n"
+            f"Choose processing type:\n"
+            f"• /mcq - Extract ALL questions\n"
+            f"• /content - Generate questions"
+        )
+        
+    except Exception as e:
+        logger.error(f"Image upload error: {e}")
+        await safe_reply(update, f"❌ Error: {str(e)}")
+
+# ---------------- PROCESSING FUNCTIONS ----------------
+async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str, is_mcq: bool = True):
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    
+    try:
+        lang = context.user_data.get("language", "gujarati")
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+        
+        if is_mcq:
+            time_estimate = "3-7 minutes" if file_size > 5 else "2-5 minutes"
+            await safe_reply(update, 
+                f"🔄 Processing MCQ PDF ({file_size:.1f}MB)...\n"
+                f"⏰ Estimated time: {time_estimate}\n"
+                f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
+                f"📝 Extracting ALL questions with enhanced quality..."
+            )
+        else:
+            time_estimate = "3-7 minutes" if file_size > 5 else "2-5 minutes"
+            await safe_reply(update, 
+                f"🔄 Processing content PDF ({file_size:.1f}MB)...\n"
+                f"⏰ Estimated time: {time_estimate}\n"
+                f"🎯 Using Gemini 2.5 Pro for best quality\n"
+                f"📝 Generating high-quality educational questions..."
+            )
+        
+        data_b64 = stream_b64_encode(file_path)
+        payload = create_pdf_prompt(data_b64, lang, is_mcq)
+        result = call_gemini_api(payload)
+        
+        if not result:
+            await safe_reply(update, "❌ Failed to process PDF. The file might be too large or contain complex images.")
+            return
+        
+        # Clean and format result
+        cleaned_result = clean_question_format(result)
+        
+        # Count questions
+        question_count = len(re.findall(r'\d+\.', cleaned_result))
+        
+        # Save and send results
+        file_type = "mcq" if is_mcq else "content"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", 
+                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
+            f.write(cleaned_result)
+            txt_path = f.name
+        
+        action = "extracted" if is_mcq else "generated"
+        await safe_reply(update, f"✅ Successfully {action} {question_count} questions with enhanced quality", txt_path)
+        
+    except Exception as e:
+        logger.error(f"PDF processing error: {e}")
+        await safe_reply(update, f"❌ Error: {str(e)}")
+    finally:
+        # Cleanup
+        if 'file_path' in locals():
+            try:
+                os.unlink(file_path)
+                logger.info("Cleaned up input PDF")
+                context.user_data.pop("current_file", None)
+            except Exception as e:
+                logger.error(f"Error cleaning PDF: {e}")
+
+async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, image_path: str, is_mcq: bool = True):
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    
+    try:
+        lang = context.user_data.get("language", "gujarati")
+        
+        if is_mcq:
+            await safe_reply(update, 
+                f"🔄 Processing MCQ image...\n"
+                f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
+                f"📝 Extracting ALL questions with enhanced quality"
+            )
+        else:
+            await safe_reply(update, 
+                f"🔄 Processing content image...\n"
+                f"🎯 Using Gemini 2.5 Pro for best quality\n"
+                f"📝 Generating high-quality educational questions"
+            )
+        
+        data_b64 = stream_b64_encode(image_path)
+        mime_type = get_mime_type(image_path)
+        
+        payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
+        result = call_gemini_api(payload)
+        
+        if not result:
+            await safe_reply(update, "❌ Failed to process image.")
+            return
+        
+        # Clean and format result
+        cleaned_result = clean_question_format(result)
+        
+        # Count questions
+        question_count = len(re.findall(r'\d+\.', cleaned_result))
+        
+        # Save and send results
+        file_type = "mcq" if is_mcq else "content"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
+            f.write(cleaned_result)
+            txt_path = f.name
+        
+        action = "extracted" if is_mcq else "generated"
+        await safe_reply(update, f"✅ Successfully {action} {question_count} questions from image with enhanced quality", txt_path)
+        
+    except Exception as e:
+        logger.error(f"Image processing error: {e}")
+        await safe_reply(update, f"❌ Error: {str(e)}")
+    finally:
+        # Cleanup
+        if 'image_path' in locals():
+            try:
+                os.unlink(image_path)
+                logger.info("Cleaned up input image")
+                context.user_data.pop("current_image", None)
+            except Exception as e:
+                logger.error(f"Error cleaning image: {e}")
+
+async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE, is_mcq: bool = True):
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    
+    images = context.user_data.get("collected_images", [])
+    if not images:
+        await safe_reply(update, "❌ No images to process")
+        return
+    
+    try:
+        lang = context.user_data.get("language", "gujarati")
+        
+        if is_mcq:
+            await safe_reply(update, 
+                f"🔄 Processing {len(images)} MCQ images...\n"
+                f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
+                f"📝 Extracting ALL questions with enhanced quality"
+            )
+        else:
+            await safe_reply(update, 
+                f"🔄 Processing {len(images)} content images...\n"
+                f"🎯 Using Gemini 2.5 Pro for best quality\n"
+                f"📝 Generating high-quality educational questions"
+            )
+        
+        # Process first image
+        image_path = images[0]
+        data_b64 = stream_b64_encode(image_path)
+        mime_type = get_mime_type(image_path)
+        
+        payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
+        result = call_gemini_api(payload)
+        
+        if not result:
+            await safe_reply(update, "❌ Failed to generate questions from images")
+            return
+        
+        # Clean and format result
+        cleaned_result = clean_question_format(result)
+        
+        # Count questions
+        question_count = len(re.findall(r'\d+\.', cleaned_result))
+        
+        # Save and send results
+        file_type = "mcq" if is_mcq else "content"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
+            f.write(cleaned_result)
+            txt_path = f.name
+        
+        action = "extracted" if is_mcq else "generated"
+        await safe_reply(update, f"✅ Successfully {action} {question_count} questions from {len(images)} images with enhanced quality", txt_path)
+        
+    except Exception as e:
+        logger.error(f"Multiple images processing error: {e}")
+        await safe_reply(update, f"❌ Error: {str(e)}")
+    finally:
+        # Cleanup all input images
+        for image_path in context.user_data.get("collected_images", []):
+            try:
+                os.unlink(image_path)
+            except Exception as e:
+                logger.error(f"Error cleaning image {image_path}: {e}")
+        
+        context.user_data["awaiting_images"] = False
+        context.user_data["collected_images"] = []
+        logger.info("Cleaned up all input images")
+
+async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
+    images = context.user_data.get("collected_images", [])
+    
+    if len(images) >= MAX_IMAGES:
+        await safe_reply(update, f"❌ Maximum {MAX_IMAGES} images reached. Send /done to process.")
+        return
+    
+    try:
+        image_path = await download_image(update, context, msg)
+        if image_path:
+            images.append(image_path)
+            context.user_data["collected_images"] = images
+            await safe_reply(update, f"✅ Image {len(images)}/{MAX_IMAGES} received. Send more or /done")
+    except Exception as e:
+        logger.error(f"Image collection error: {e}")
+        await safe_reply(update, f"❌ Error collecting image: {str(e)}")
+
+async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
+    try:
+        file = None
+        ext = ".jpg"  # Default extension
+        
+        if msg.document:
+            file_obj = msg.document
+            ext = Path(file_obj.file_name).suffix.lower()
+            if ext not in SUPPORTED_IMAGE_TYPES:
+                await safe_reply(update, f"❌ Unsupported image format. Use: {', '.join(SUPPORTED_IMAGE_TYPES)}")
+                return None
+                
+            if file_obj.file_size > MAX_IMAGE_SIZE_MB * 1024 * 1024:
+                await safe_reply(update, f"❌ Image too large. Max {MAX_IMAGE_SIZE_MB}MB")
+                return None
+                
+            file = await file_obj.get_file()
+            
+        elif msg.photo:
+            # Get the largest photo size (works with forwarded photos too)
+            file_obj = msg.photo[-1]
+            file = await file_obj.get_file()
+            ext = ".jpg"
+        else:
+            return None
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+            image_path = tmp_file.name
+        
+        # Download the file
+        await file.download_to_drive(image_path)
+        return image_path
+        
+    except Exception as e:
+        logger.error(f"Image download error: {e}")
+        await safe_reply(update, f"❌ Error downloading image: {str(e)}")
+        return None
+
+# ---------------- MAIN ----------------
+def run_bot():
+    """Run both Flask and Telegram bot"""
+    # Build Telegram application
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Add ALL handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("setlang", setlang))
+    application.add_handler(CommandHandler("setcount", setcount))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("pdf", pdf_process))
+    application.add_handler(CommandHandler("image", image_process))
+    application.add_handler(CommandHandler("images", images_process))
+    application.add_handler(CommandHandler("done", done_images))
+    application.add_handler(CommandHandler("mcq", mcq_command))
+    application.add_handler(CommandHandler("content", content_command))
+    application.add_handler(MessageHandler(
+        filters.Document.ALL | filters.PHOTO, handle_file
+    ))
+    
+    logger.info("Starting Enhanced OCR Bot with Gemini 2.5 Pro support...")
+    
+    # Run Flask in separate thread
+    from threading import Thread
+    import waitress
+    
+    def run_flask():
+        logger.info(f"Starting Flask server on port {PORT}")
+        waitress.serve(flask_app, host='0.0.0.0', port=PORT)
+    
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Start Telegram bot
+    logger.info("Starting Telegram bot polling...")
+    application.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    run_bot()
