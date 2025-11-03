@@ -7,7 +7,7 @@ from telegram.constants import ChatAction
 
 from config import *
 from decorators import owner_only
-from helpers import safe_reply, clean_question_format
+from helpers import safe_reply, clean_question_format, optimize_for_poll
 from gemini_client import call_gemini_api
 
 @owner_only
@@ -80,48 +80,50 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏰ This may take 1-3 minutes..."
     )
 
-    # --- 2. Build AI Prompt ---
-    prompt_text = f"""Create {amount} MCQs on the topic {topic} in **{language}** at a difficult level.
-Format:
+    # --- 2. Build AI Prompt with STRICT ENFORCEMENT ---
+    prompt_text = f"""CRITICAL: STRICTLY FOLLOW THESE CHARACTER LIMITS:
+    • Questions: MAX 4096 characters
+    • Options (a/b/c/d): MAX 100 characters each  
+    • Explanations: MAX 200 characters
 
-Each question must be numbered (1., 2., etc.)
-Each question should have exactly 4 options: (a), (b), (c), (d).
+    Create {amount} MCQs on the topic: {topic}
+    Language: {language}
+    Difficulty: Hard
 
-Place a ✅ emoji next to the single correct option. Ensure the correct option's position is randomized/shuffled across questions (e.g., not always (a) or (b)).
+    FORMAT RULES (NON-NEGOTIABLE):
+    1. [Number]. [Question - MUST be under 4096 chars]
+    2. a) [Option A - MUST be under 100 chars]
+    3. b) [Option B - MUST be under 100 chars] 
+    4. c) [Option C - MUST be under 100 chars]
+    5. d) [Option D - MUST be under 100 chars] ✅
+    6. Ex: [Explanation - MUST be under 200 chars]
 
-After each question, add a brief explanation under "Ex:" (max 200 characters).
+    CONTENT RULES:
+    • Place ✅ only on the correct option
+    • Randomize correct option position
+    • Use concise, clear language
+    • If any content exceeds limits, SHORTEN it immediately
+    • For statements, use I. II. III. IV. format
 
-Every explanation MUST end with the text: {STYLISH_SIGNATURE}
+    EXAMPLE (PROPER FORMAT):
+    1. What is the capital of France?
+    a) London
+    b) Berlin  
+    c) Paris ✅
+    d) Madrid
+    Ex: Paris is the capital and largest city of France.
 
-Output everything inside a single markdown code block (```). Keep everything concise.
-Example format:
-1. Who founded the Tughlaq Dynasty? / तुग़लक वंश की स्थापना किसने की?
-(a) Ghiyasuddin Tughlaq / घियासुद्दीन तुग़लक ✅
-(b) Alauddin Khilji / अलाउद्दीन खिलजी
-(c) Bahlol Lodhi / बहलोल लोधी
-(d) Khizr Khan / खिज़र खान
-Ex: Ghiyasuddin Tughlaq founded the dynasty in 1320. {STYLISH_SIGNATURE}
-
-If questions have any statements then start statements with I. II. III. IV. like eg. below 
-1. Consider the following statements regarding the Western Ghats:
-I. They are block mountains formed due to the rifting of the Gondwana landmass.
-II. They act as a major watershed for several peninsular rivers flowing eastward.
-III. Anai Mudi is the highest peak in the Western Ghats, located in Kerala.
-
-Now make the MCQs for the topic: {topic}
-Ensure ALL questions follow Telegram poll limits:
-• Questions: ≤4096 characters
-• Options: ≤100 characters each
-• Explanations: ≤200 characters
-"""
+    Now create {amount} MCQs on: {topic}
+    ENSURE ALL CONTENT FITS THE CHARACTER LIMITS!
+    """
 
     # --- 3. Call Gemini API ---
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
-            "temperature": 0.5,
+            "temperature": 0.3,  # Lower temperature for more consistent output
             "topK": 1,
-            "topP": 1,
+            "topP": 0.8,
             "maxOutputTokens": 8192,
         },
     }
@@ -137,7 +139,7 @@ Ensure ALL questions follow Telegram poll limits:
         await safe_reply(update, f"❌ **HTTP Request Failed:**\n`{str(e)}`")
         return
 
-    # --- 4. Parse Response and Create File ---
+    # --- 4. Parse Response and ENFORCE Limits ---
     try:
         clean_text = re.sub(r'^```(markdown|text|)?\s*|\s*```$', '', result, flags=re.MULTILINE | re.DOTALL).strip()
 
@@ -145,11 +147,17 @@ Ensure ALL questions follow Telegram poll limits:
             await safe_reply(update, f"❌ **Empty Response:** The AI returned an empty or invalid response.")
             return
 
-        # Clean and format for Telegram polls
-        cleaned_result = clean_question_format(clean_text)
+        # FIRST: Apply strict character limit enforcement
+        enforced_text = enforce_telegram_limits(clean_text)
+        
+        # SECOND: Clean and format for Telegram polls
+        cleaned_result = clean_question_format(enforced_text)
+        
+        # THIRD: Apply final optimization
+        final_result = optimize_for_poll(cleaned_result)
         
         # Count questions
-        question_count = len(re.findall(r'\d+\.', cleaned_result))
+        question_count = len(re.findall(r'\d+\.', final_result))
         
         # Create filename
         topic_cleaned = re.sub(r'[^a-zA-Z0-9]', '', topic.replace(" ", "_"))
@@ -160,17 +168,69 @@ Ensure ALL questions follow Telegram poll limits:
         # Save to temporary file
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", 
                                        suffix="_ai_mcqs.txt", delete=False) as f:
-            f.write(cleaned_result)
+            f.write(final_result)
             txt_path = f.name
 
         await safe_reply(update, 
             f"✅ **AI Generated {question_count} MCQs**\n"
             f"📚 **Topic:** {topic}\n"
             f"🌍 **Language:** {language}\n"
-            f"📊 **Telegram Poll Ready**", 
+            f"📊 **Telegram Poll Ready**\n"
+            f"🔒 **Character Limits Enforced**", 
             txt_path
         )
 
     except Exception as e:
         logger.error(f"AI processing error: {e}")
         await safe_reply(update, f"❌ **An error occurred processing the AI response:**\n`{str(e)}`")
+
+def enforce_telegram_limits(text: str) -> str:
+    """
+    STRICTLY enforce Telegram poll character limits
+    """
+    lines = text.split('\n')
+    enforced_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            enforced_lines.append(line)
+            continue
+            
+        # Handle questions (numbered lines)
+        if re.match(r'^\d+\.', line):
+            if len(line) > 4096:
+                # Force truncate question
+                enforced_lines.append(line[:4096])
+            else:
+                enforced_lines.append(line)
+                
+        # Handle options (a), b), c), d))
+        elif re.match(r'^[a-d]\)', line):
+            if len(line) > 100:
+                # Force truncate option
+                option_marker = line[:3]  # Keep "a) ", "b) ", etc.
+                option_text = line[3:].strip()
+                if len(option_text) > 97:  # Leave room for marker
+                    option_text = option_text[:97] + '...'
+                enforced_lines.append(f"{option_marker}{option_text}")
+            else:
+                enforced_lines.append(line)
+                
+        # Handle explanations
+        elif line.startswith('Ex:'):
+            explanation = line[3:].strip()
+            if len(explanation) > 200:
+                # Force truncate explanation
+                explanation = explanation[:200]
+                # Ensure it ends with proper punctuation
+                if not explanation.endswith(('.', '!', '?')):
+                    explanation = explanation.rstrip() + '.'
+                enforced_lines.append(f"Ex: {explanation}")
+            else:
+                enforced_lines.append(line)
+                
+        else:
+            enforced_lines.append(line)
+    
+    return '\n'.join(enforced_lines)
