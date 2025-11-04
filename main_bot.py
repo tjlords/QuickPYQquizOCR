@@ -1,4 +1,4 @@
-# main_bot.py
+# main_bot.py (Simple Polling Fix)
 import os
 import logging
 from flask import Flask, jsonify
@@ -36,58 +36,50 @@ def health():
     return jsonify({"status": "healthy"})
 
 def run_bot():
-    # Build Telegram application - v20.3 compatible
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Add ALL handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setlang", setlang))
-    application.add_handler(CommandHandler("setcount", setcount))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("pdf", pdf_process))
-    application.add_handler(CommandHandler("websankul", websankul_process))
-    application.add_handler(CommandHandler("image", image_process))
-    application.add_handler(CommandHandler("images", images_process))
-    application.add_handler(CommandHandler("done", done_images))
-    application.add_handler(CommandHandler("mcq", mcq_command))
-    application.add_handler(CommandHandler("content", content_command))
-    application.add_handler(CommandHandler("websankul_process", websankul_command))
-    application.add_handler(CommandHandler("ai", ai_command))
-    
-    # File handlers
-    application.add_handler(MessageHandler(
-        filters.Document.ALL | filters.PHOTO, handle_file
-    ))
-    
-    logger.info("🚀 Starting Enhanced OCR Bot with WebSankul Support...")
-    
-    # Run Flask in separate thread
-    def run_flask():
-        logger.info(f"🌐 Starting Flask server on port {PORT}")
-        waitress.serve(flask_app, host='0.0.0.0', port=PORT)
-    
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Start Telegram bot - v20.3 compatible
-    logger.info("🤖 Starting Telegram bot polling...")
-    
-    # Use webhook mode instead of polling to avoid the Updater issue
-    render_url = os.getenv('RENDER_EXTERNAL_URL')
-    if render_url:
-        # Use webhooks on Render
-        webhook_url = f"{render_url}/webhook"
-        logger.info(f"🌐 Setting webhook to: {webhook_url}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=webhook_url,
-            drop_pending_updates=True
+    try:
+        # Build Telegram application
+        application = ApplicationBuilder().token(BOT_TOKEN).build()
+        
+        # Add ALL handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("setlang", setlang))
+        application.add_handler(CommandHandler("setcount", setcount))
+        application.add_handler(CommandHandler("status", status))
+        application.add_handler(CommandHandler("pdf", pdf_process))
+        application.add_handler(CommandHandler("websankul", websankul_process))
+        application.add_handler(CommandHandler("image", image_process))
+        application.add_handler(CommandHandler("images", images_process))
+        application.add_handler(CommandHandler("done", done_images))
+        application.add_handler(CommandHandler("mcq", mcq_command))
+        application.add_handler(CommandHandler("content", content_command))
+        application.add_handler(CommandHandler("websankul_process", websankul_command))
+        application.add_handler(CommandHandler("ai", ai_command))
+        
+        # File handlers
+        application.add_handler(MessageHandler(
+            filters.Document.ALL | filters.PHOTO, handle_file
+        ))
+        
+        logger.info("🚀 Starting Enhanced OCR Bot with WebSankul Support...")
+        
+        # Run Flask in separate thread
+        def run_flask():
+            logger.info(f"🌐 Starting Flask server on port {PORT}")
+            waitress.serve(flask_app, host='0.0.0.0', port=PORT)
+        
+        flask_thread = Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Start Telegram bot with error handling
+        logger.info("🤖 Starting Telegram bot polling...")
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"]
         )
-    else:
-        # Fallback to polling for local development
-        logger.warning("🌐 No webhook URL found, using polling")
-        application.run_polling(drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to start bot: {e}")
+        raise
 
 if __name__ == "__main__":
     run_bot()
