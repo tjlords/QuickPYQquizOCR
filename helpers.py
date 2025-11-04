@@ -307,3 +307,29 @@ def enforce_telegram_limits(text: str) -> str:
             enforced_lines.append(line)
     
     return '\n'.join(enforced_lines)
+
+def enforce_explanation_format(text: str) -> str:
+    """
+    Ensure ALL explanations start with Ex: and remove bold formatting
+    """
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        # Remove all ** bold formatting
+        line = line.replace('**', '')
+        
+        # Convert explanations to start with Ex:
+        if any(marker in line for marker in ['વિગતઃ', 'Explanation:', 'Explain:', 'Details:']):
+            if line.startswith('વિગતઃ'):
+                line = line.replace('વિગતઃ', 'Ex:', 1)
+            elif line.startswith('Explanation:'):
+                line = line.replace('Explanation:', 'Ex:', 1)
+            elif line.startswith('Explain:'):
+                line = line.replace('Explain:', 'Ex:', 1)
+            elif line.startswith('Details:'):
+                line = line.replace('Details:', 'Ex:', 1)
+        
+        cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)

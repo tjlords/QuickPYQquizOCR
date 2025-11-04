@@ -51,7 +51,7 @@ def run_bot():
     application.add_handler(CommandHandler("done", done_images))
     application.add_handler(CommandHandler("mcq", mcq_command))
     application.add_handler(CommandHandler("content", content_command))
-    application.add_handler(CommandHandler("websankul_process", websankul_command))
+    application.add_handler(CommandHandler("websankul_process", websankul_command))  # ✅ FIXED
     application.add_handler(CommandHandler("ai", ai_command))
     
     # File handlers

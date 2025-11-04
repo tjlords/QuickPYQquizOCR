@@ -10,7 +10,7 @@ from telegram.constants import ChatAction
 
 from config import *
 from decorators import owner_only
-from helpers import safe_reply, stream_b64_encode, clean_question_format, enforce_correct_answer_format
+from helpers import safe_reply, stream_b64_encode, clean_question_format, enforce_correct_answer_format, enforce_explanation_format
 from gemini_client import call_gemini_api
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,11 @@ def create_websankul_prompt(data_b64: str, explanation_language: str):
     3. That red option is the CORRECT ANSWER
     4. Mark it with ✅
 
+    ✅ CRITICAL FORMATTING RULES:
+    - REMOVE ALL **bold** formatting
+    - ALL explanations MUST start with "Ex:" (NOT "વિગતઃ" or any other text)
+    - Extract ALL 30 questions, don't skip any
+
     ✅ EXAMPLE:
     Second section shows:
     1. What is 2+2?
@@ -164,9 +169,7 @@ def create_websankul_prompt(data_b64: str, explanation_language: str):
     c) 5
     d) 6
 
-    Result: b) 4 ✅
-
-    ✅ FINAL FORMAT:
+    Result: 
     1. What is 2+2?
     a) 3
     b) 4 ✅
@@ -174,14 +177,23 @@ def create_websankul_prompt(data_b64: str, explanation_language: str):
     d) 6
     Ex: Basic arithmetic.
 
+    ✅ FINAL FORMAT:
+    [Number]. [Question]
+    a) [Option A]
+    b) [Option B]
+    c) [Option C]
+    d) [Option D] ✅
+    Ex: [Explanation]
+
     ✅ RULES:
     - Only look at SECOND occurrence of questions (after OMR)
     - RED option = CORRECT answer
     - Only ONE ✅ per question
-    - Explanations in {explanation_language}
-    - Follow Telegram character limits
+    - ALL explanations start with "Ex:"
+    - NO bold formatting (**)
+    - Extract ALL 30 questions
 
-    ✅ OUTPUT ALL 30 QUESTIONS WITH RED OPTIONS MARKED AS CORRECT!
+    ✅ OUTPUT ALL 30 QUESTIONS WITH CORRECT FORMATTING!
     """
     
     return {
@@ -274,10 +286,10 @@ async def process_websankul_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         
         await safe_reply(update, 
             f"🎯 Processing WebSankul PDF ({file_size:.1f}MB)\n"
-            f"⏰ Estimated time: 2-5 minutes\n"
-            f"🔍 Phase 1: Finding second question set...\n"
-            f"🎯 Phase 2: Detecting red answers...\n"
-            f"📊 Phase 3: Formatting for Telegram polls..."
+            f"⏰ Estimated time: 3-7 minutes\n"
+            f"🔍 Finding second question set...\n"
+            f"🎯 Detecting red answers...\n"
+            f"📝 Formatting for polls..."
         )
         
         data_b64 = stream_b64_encode(file_path)
@@ -293,8 +305,9 @@ async def process_websankul_pdf(update: Update, context: ContextTypes.DEFAULT_TY
             await safe_reply(update, "❌ Failed to process WebSankul PDF. The file might be corrupted or too complex.")
             return
         
-        # Clean and format result (NO tick enforcement for WebSankul - trust the red detection)
+        # Clean and format result
         cleaned_result = clean_question_format(result)
+        cleaned_result = enforce_explanation_format(cleaned_result)
         
         question_count = len(re.findall(r'\d+\.', cleaned_result))
         
