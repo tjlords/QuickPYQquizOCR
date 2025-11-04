@@ -188,6 +188,24 @@ def enforce_correct_answer_format(text: str) -> str:
     
     return '\n'.join(formatted_lines)
 
+def nuclear_tick_fix(text: str) -> str:
+    """
+    NUCLEAR OPTION: Force ✅ on option d) for every question
+    """
+    lines = text.split('\n')
+    fixed_lines = []
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        line = re.sub(r'[✅✓✔️☑️]', '', line).strip()
+        
+        if re.match(r'^\(D\)', line):
+            fixed_lines.append(f"{line} ✅")
+        else:
+            fixed_lines.append(line)
+    
+    return '\n'.join(fixed_lines)
+
 def enforce_explanation_format(text: str) -> str:
     lines = text.split('\n')
     cleaned_lines = []
