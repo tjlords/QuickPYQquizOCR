@@ -36,13 +36,8 @@ def health():
     return jsonify({"status": "healthy"})
 
 def run_bot():
-    # Build Telegram application - FIXED for v20.3
-    application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
+    # Build Telegram application - v20.3 compatible
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     # Add ALL handlers
     application.add_handler(CommandHandler("start", start))
@@ -74,12 +69,25 @@ def run_bot():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Start Telegram bot - FIXED for v20.3
+    # Start Telegram bot - v20.3 compatible
     logger.info("🤖 Starting Telegram bot polling...")
-    application.run_polling(
-        drop_pending_updates=True,
-        close_loop=False
-    )
+    
+    # Use webhook mode instead of polling to avoid the Updater issue
+    render_url = os.getenv('RENDER_EXTERNAL_URL')
+    if render_url:
+        # Use webhooks on Render
+        webhook_url = f"{render_url}/webhook"
+        logger.info(f"🌐 Setting webhook to: {webhook_url}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=webhook_url,
+            drop_pending_updates=True
+        )
+    else:
+        # Fallback to polling for local development
+        logger.warning("🌐 No webhook URL found, using polling")
+        application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     run_bot()
