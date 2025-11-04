@@ -8,7 +8,7 @@ from telegram.constants import ChatAction
 
 from config import *
 from decorators import owner_only
-from helpers import safe_reply, clean_question_format, optimize_for_poll
+from helpers import safe_reply, clean_question_format, optimize_for_poll, enforce_correct_answer_format, nuclear_tick_fix, enforce_telegram_limits
 from gemini_client import call_gemini_api
 
 logger = logging.getLogger(__name__)

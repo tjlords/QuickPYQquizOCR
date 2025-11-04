@@ -9,7 +9,7 @@ from telegram.constants import ChatAction
 
 from config import *
 from decorators import owner_only
-from helpers import safe_reply, stream_b64_encode, get_mime_type, clean_question_format
+from helpers import safe_reply, stream_b64_encode, get_mime_type, clean_question_format, enforce_correct_answer_format
 from gemini_client import call_gemini_api
 
 logger = logging.getLogger(__name__)
