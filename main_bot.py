@@ -36,8 +36,13 @@ def health():
     return jsonify({"status": "healthy"})
 
 def run_bot():
-    # Build Telegram application
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Build Telegram application - FIXED for v20.3
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
     
     # Add ALL handlers
     application.add_handler(CommandHandler("start", start))
@@ -51,7 +56,7 @@ def run_bot():
     application.add_handler(CommandHandler("done", done_images))
     application.add_handler(CommandHandler("mcq", mcq_command))
     application.add_handler(CommandHandler("content", content_command))
-    application.add_handler(CommandHandler("websankul_process", websankul_command))  # ✅ FIXED
+    application.add_handler(CommandHandler("websankul_process", websankul_command))
     application.add_handler(CommandHandler("ai", ai_command))
     
     # File handlers
@@ -69,9 +74,12 @@ def run_bot():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Start Telegram bot
+    # Start Telegram bot - FIXED for v20.3
     logger.info("🤖 Starting Telegram bot polling...")
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(
+        drop_pending_updates=True,
+        close_loop=False
+    )
 
 if __name__ == "__main__":
     run_bot()
