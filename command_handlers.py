@@ -1,10 +1,9 @@
 # command_handlers.py
 import logging
-
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import SUPPORTED_LANGUAGES
+from config import SUPPORTED_LANGUAGES, GEMINI_MODELS, MAX_PDF_SIZE_MB, MAX_IMAGE_SIZE_MB, MAX_IMAGES
 from decorators import owner_only
 from helpers import safe_reply
 
@@ -18,26 +17,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *Available Commands:*
 /setlang - Set explanation language
 /setcount - Set question count for content
-/pdf - Process PDF file  
+/pdf - Process regular PDF file  
+/websankul - Process WebSankul PDF (auto-detect red answers)
 /image - Process single image
 /images - Process multiple images
-/ai - Generate MCQs on any topic using AI
-/status - Current settings
+/ai - Generate MCQs on any topic
 
 *After sending files, use:*
-/mcq - Extract all questions (for question papers)
-/content - Generate questions (for textbooks)
+/mcq - Extract all questions + auto-find answers
+/content - Generate questions from content
+/websankul - Process WebSankul format
 
-*Enhanced Features:*
-• Larger PDF support (up to 15MB)
-• Gemini 2.5 Pro for highest quality
-• Automatic Telegram poll optimization
-• Better formatting with statement numbering
-
-*Telegram Poll Ready:*
-• Questions auto-optimized for 4096 char limit
-• Explanations auto-optimized for 200 char limit
-• Options auto-optimized for 100 char limit
+*Special Features:*
+• 🎯 WebSankul: Auto-detect red text answers
+• 🔍 Smart MCQ: Find answers from marks/highlights
+• 📊 Telegram Poll Ready
+• ✅ Guaranteed correct answer formatting
 
 *Current Limits:*
 • PDF: ≤15MB
@@ -86,6 +81,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Questions: ≤4096 characters
 • Explanations: ≤200 characters  
 • Options: ≤100 characters
+• ✅ Strict correct answer formatting
 
 *Available Models:*
 {", ".join(GEMINI_MODELS[:3])}

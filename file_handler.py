@@ -20,8 +20,32 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = update.effective_message
     
-    # Handle PDF
-    if context.user_data.get("awaiting_pdf") and msg.document:
+    # Handle PDF for WebSankul
+    if context.user_data.get("awaiting_websankul") and msg.document:
+        file = msg.document
+        if file.file_name.lower().endswith(".pdf"):
+            if file.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
+                await safe_reply(update, f"❌ PDF too large. Max {MAX_PDF_SIZE_MB}MB")
+                return
+            
+            await update.message.reply_text("📥 Downloading WebSankul PDF...")
+            file_obj = await file.get_file()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                pdf_path = tmp_file.name
+            await file_obj.download_to_drive(pdf_path)
+            
+            context.user_data["current_file"] = pdf_path
+            context.user_data["awaiting_websankul"] = False
+            
+            await safe_reply(update,
+                f"✅ WebSankul PDF received: `{file.file_name}`\n\n"
+                f"Choose processing:\n"
+                f"• /websankul - Extract questions + find red text answers"
+            )
+            return
+    
+    # Handle regular PDF
+    elif context.user_data.get("awaiting_pdf") and msg.document:
         file = msg.document
         if file.file_name.lower().endswith(".pdf"):
             if file.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
