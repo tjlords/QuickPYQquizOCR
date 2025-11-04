@@ -33,7 +33,6 @@ async def safe_reply(update: Update, text: str, file_path: str = None):
                 )
             try:
                 os.unlink(file_path)
-                logger.info(f"🧹 Cleaned up output file: {file_path}")
             except Exception as e:
                 logger.error(f"Error cleaning output file: {e}")
         else:
@@ -54,27 +53,16 @@ def optimize_for_poll(text: str) -> str:
             
         if re.match(r'^\d+\.', line):
             if len(line) > 4000:
-                sentences = re.split(r'[.!?]', line)
-                if len(sentences) > 1:
-                    first_sentence = sentences[0].strip()
-                    if first_sentence and len(first_sentence) <= 4000:
-                        optimized_lines.append(first_sentence + '.')
+                words = line.split()
+                shortened = []
+                current_length = 0
+                for word in words:
+                    if current_length + len(word) + 1 <= 4000:
+                        shortened.append(word)
+                        current_length += len(word) + 1
                     else:
-                        words = line.split()
-                        shortened = []
-                        current_length = 0
-                        for word in words:
-                            if current_length + len(word) + 1 <= 4000:
-                                shortened.append(word)
-                                current_length += len(word) + 1
-                            else:
-                                break
-                        if shortened:
-                            optimized_lines.append(' '.join(shortened))
-                        else:
-                            optimized_lines.append(line[:4000])
-                else:
-                    optimized_lines.append(line[:4000])
+                        break
+                optimized_lines.append(' '.join(shortened) if shortened else line[:4000])
             else:
                 optimized_lines.append(line)
                 
@@ -93,36 +81,19 @@ def optimize_for_poll(text: str) -> str:
                         important_parts.append(sentence)
                         current_length += len(sentence_with_dot)
                     else:
-                        words = sentence.split()
-                        partial_sentence = []
-                        for word in words:
-                            if current_length + len(word) + 1 <= 200:
-                                partial_sentence.append(word)
-                                current_length += len(word) + 1
-                            else:
-                                break
-                        if partial_sentence:
-                            important_parts.append(' '.join(partial_sentence))
                         break
                 if important_parts:
                     optimized_explanation = '. '.join(important_parts)
-                    if optimized_explanation and not optimized_explanation.endswith(('.', '!', '?')):
+                    if not optimized_explanation.endswith(('.', '!', '?')):
                         optimized_explanation += '.'
                     optimized_lines.append(f"Ex: {optimized_explanation}")
                 else:
-                    if len(explanation) > 200:
-                        last_space = explanation[:200].rfind(' ')
-                        if last_space > 150:
-                            optimized_lines.append(f"Ex: {explanation[:last_space]}")
-                        else:
-                            optimized_lines.append(f"Ex: {explanation[:200]}")
-                    else:
-                        optimized_lines.append(line)
+                    optimized_lines.append(f"Ex: {explanation[:200]}")
             else:
                 optimized_lines.append(line)
                 
-        elif re.match(r'^[a-d]\)', line):
-            option_text = line[3:].strip()
+        elif re.match(r'^\([A-D]\)', line):
+            option_text = line[4:].strip()
             if len(option_text) > 100:
                 words = option_text.split()
                 shortened = []
@@ -133,10 +104,7 @@ def optimize_for_poll(text: str) -> str:
                         current_length += len(word) + 1
                     else:
                         break
-                if shortened:
-                    optimized_lines.append(f"{line[:3]}{' '.join(shortened)}")
-                else:
-                    optimized_lines.append(f"{line[:3]}{option_text[:100]}")
+                optimized_lines.append(f"{line[:4]}{' '.join(shortened)}" if shortened else f"{line[:4]}{option_text[:100]}")
             else:
                 optimized_lines.append(line)
                 
@@ -152,9 +120,8 @@ def process_single_question(question_lines):
             processed_lines.append(line)
         else:
             if (re.match(r'^\d+\.\s', line) and 
-                not line.startswith(('a)', 'b)', 'c)', 'd)', 'Ex:')) and
-                len(line) > 3 and
-                not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)'])):
+                not line.startswith(('(A)', '(B)', '(C)', '(D)', 'Ex:')) and
+                len(line) > 3):
                 line = re.sub(r'^(\d+)\.\s', r'\1) ', line)
             processed_lines.append(line)
     return processed_lines
@@ -169,7 +136,7 @@ def clean_question_format(text: str) -> str:
         line = line.strip()
         if not line:
             continue
-        if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['a)', 'b)', 'c)', 'd)']):
+        if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['(A)', '(B)', '(C)', '(D)']):
             if current_question:
                 cleaned_question = process_single_question(current_question)
                 optimized_question = optimize_for_poll('\n'.join(cleaned_question))
@@ -193,10 +160,6 @@ def clean_question_format(text: str) -> str:
     return '\n'.join(cleaned_lines)
 
 def enforce_correct_answer_format(text: str) -> str:
-    """
-    ENFORCE strict correct answer formatting with ✅
-    Only ONE ✅ per question, placed correctly
-    """
     lines = text.split('\n')
     formatted_lines = []
     current_question_has_tick = False
@@ -211,10 +174,10 @@ def enforce_correct_answer_format(text: str) -> str:
             current_question_has_tick = False
             formatted_lines.append(line)
             
-        elif re.match(r'^[a-d]\)', line):
+        elif re.match(r'^\([A-D]\)', line):
             clean_line = re.sub(r'[✅✓✔️☑️🔴🟢⭐🎯]', '', line).strip()
             
-            if not current_question_has_tick and line.startswith('d)'):
+            if not current_question_has_tick and line.startswith('(D)'):
                 formatted_lines.append(f"{clean_line} ✅")
                 current_question_has_tick = True
             else:
@@ -223,103 +186,15 @@ def enforce_correct_answer_format(text: str) -> str:
         else:
             formatted_lines.append(line)
     
-    if not any('✅' in line for line in formatted_lines):
-        formatted_lines = add_missing_ticks(formatted_lines)
-    
     return '\n'.join(formatted_lines)
 
-def add_missing_ticks(lines):
-    """Add ✅ to option d) if no ticks found"""
-    formatted_lines = []
-    in_question = False
-    
-    for line in lines:
-        if re.match(r'^\d+\.', line):
-            in_question = True
-            formatted_lines.append(line)
-        elif re.match(r'^[a-d]\)', line) and in_question:
-            if line.startswith('d)'):
-                formatted_lines.append(f"{line} ✅")
-                in_question = False
-            else:
-                formatted_lines.append(line)
-        else:
-            formatted_lines.append(line)
-    
-    return formatted_lines
-
-def nuclear_tick_fix(text: str) -> str:
-    """
-    NUCLEAR OPTION: Force ✅ on option d) for every question
-    """
-    lines = text.split('\n')
-    fixed_lines = []
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        line = re.sub(r'[✅✓✔️☑️]', '', line).strip()
-        
-        if re.match(r'^d\)', line):
-            fixed_lines.append(f"{line} ✅")
-        else:
-            fixed_lines.append(line)
-    
-    return '\n'.join(fixed_lines)
-
-def enforce_telegram_limits(text: str) -> str:
-    """STRICTLY enforce Telegram poll character limits"""
-    lines = text.split('\n')
-    enforced_lines = []
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            enforced_lines.append(line)
-            continue
-            
-        if re.match(r'^\d+\.', line):
-            if len(line) > 4096:
-                enforced_lines.append(line[:4096])
-            else:
-                enforced_lines.append(line)
-                
-        elif re.match(r'^[a-d]\)', line):
-            if len(line) > 100:
-                option_marker = line[:3]
-                option_text = line[3:].strip()
-                if len(option_text) > 97:
-                    option_text = option_text[:97] + '...'
-                enforced_lines.append(f"{option_marker}{option_text}")
-            else:
-                enforced_lines.append(line)
-                
-        elif line.startswith('Ex:'):
-            explanation = line[3:].strip()
-            if len(explanation) > 200:
-                explanation = explanation[:200]
-                if not explanation.endswith(('.', '!', '?')):
-                    explanation = explanation.rstrip() + '.'
-                enforced_lines.append(f"Ex: {explanation}")
-            else:
-                enforced_lines.append(line)
-                
-        else:
-            enforced_lines.append(line)
-    
-    return '\n'.join(enforced_lines)
-
 def enforce_explanation_format(text: str) -> str:
-    """
-    Ensure ALL explanations start with Ex: and remove bold formatting
-    """
     lines = text.split('\n')
     cleaned_lines = []
     
     for line in lines:
-        # Remove all ** bold formatting
         line = line.replace('**', '')
         
-        # Convert explanations to start with Ex:
         if any(marker in line for marker in ['વિગતઃ', 'Explanation:', 'Explain:', 'Details:']):
             if line.startswith('વિગતઃ'):
                 line = line.replace('વિગતઃ', 'Ex:', 1)
@@ -333,3 +208,75 @@ def enforce_explanation_format(text: str) -> str:
         cleaned_lines.append(line)
     
     return '\n'.join(cleaned_lines)
+
+def enforce_telegram_limits_strict(text: str) -> str:
+    lines = text.split('\n')
+    enforced_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            enforced_lines.append(line)
+            continue
+            
+        if re.match(r'^\d+\.', line):
+            if len(line) > 4096:
+                words = line.split()
+                shortened = []
+                current_length = 0
+                for word in words:
+                    if current_length + len(word) + 1 <= 4096:
+                        shortened.append(word)
+                        current_length += len(word) + 1
+                    else:
+                        break
+                enforced_lines.append(' '.join(shortened) if shortened else line[:4096])
+            else:
+                enforced_lines.append(line)
+                
+        elif re.match(r'^\([A-D]\)', line):
+            if len(line) > 100:
+                option_marker = line[:4]
+                option_text = line[4:].strip()
+                if len(option_text) > 96:
+                    words = option_text.split()
+                    important_words = []
+                    current_length = 0
+                    for word in words:
+                        if current_length + len(word) + 1 <= 96:
+                            important_words.append(word)
+                            current_length += len(word) + 1
+                        else:
+                            break
+                    option_text = ' '.join(important_words) if important_words else option_text[:96]
+                enforced_lines.append(f"{option_marker}{option_text}")
+            else:
+                enforced_lines.append(line)
+                
+        elif line.startswith('Ex:'):
+            explanation = line[3:].strip()
+            if len(explanation) > 200:
+                sentences = re.split(r'[.!?]', explanation)
+                important_parts = []
+                current_length = 0
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+                    sentence_with_dot = sentence + '.' if not sentence.endswith('.') else sentence
+                    if current_length + len(sentence_with_dot) <= 200:
+                        important_parts.append(sentence)
+                        current_length += len(sentence_with_dot)
+                    else:
+                        break
+                explanation = '. '.join(important_parts) if important_parts else explanation[:200]
+                if not explanation.endswith(('.', '!', '?')):
+                    explanation += '.'
+                enforced_lines.append(f"Ex: {explanation}")
+            else:
+                enforced_lines.append(line)
+                
+        else:
+            enforced_lines.append(line)
+    
+    return '\n'.join(enforced_lines)
