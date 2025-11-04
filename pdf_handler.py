@@ -31,12 +31,12 @@ async def pdf_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def websankul_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_websankul"] = True
     await safe_reply(update, 
-        f"🎯 WebSankul Mode Activated\n\n"
-        f"📄 Send me a WebSankul PDF with:\n"
-        f"• 30 Questions (no tick marks)\n"
-        f"• OMR page\n"
-        f"• Answer key with red-colored answers\n\n"
-        f"I'll automatically extract questions + find correct answers from red text!"
+        "🎯 WebSankul Mode Activated\n\n"
+        "📄 Send me a WebSankul PDF with:\n"
+        "• 30 Questions (no tick marks)\n"
+        "• OMR page\n"
+        "• Same questions repeated with red answers\n\n"
+        "I'll automatically detect red answers and format for polls!"
     )
 
 @owner_only
@@ -143,50 +143,45 @@ def create_pdf_prompt(data_b64: str, explanation_language: str, is_mcq: bool = T
 
 def create_websankul_prompt(data_b64: str, explanation_language: str):
     prompt_text = f"""
-    EXTRACT and PROCESS this WebSankul exam PDF:
+    PROCESS THIS WEBSANKUL PDF - GUARANTEED STRUCTURE:
 
-    PDF STRUCTURE:
-    1. 30 Questions (no tick marks)
-    2. OMR page 
-    3. Answer key with answers in RED COLOR
+    ✅ GUARANTEED PDF FORMAT:
+    - First section: 30 Questions with options (NO colored text)
+    - Middle: OMR sheet page
+    - Second section: EXACT SAME 30 Questions with ANSWERS IN RED COLOR
 
-    YOUR TASKS:
+    ✅ YOUR SIMPLE TASK:
+    1. Find the SECOND occurrence of each question (after OMR page)
+    2. Identify which option is written in RED COLOR
+    3. That red option is the CORRECT ANSWER
+    4. Mark it with ✅
 
-    PHASE 1: EXTRACT ALL 30 QUESTIONS
-    - Extract every question exactly as written
-    - Preserve all 4 options for each question
-    - Keep the original numbering (1-30)
+    ✅ EXAMPLE:
+    Second section shows:
+    1. What is 2+2?
+    a) 3
+    b) 4  [RED COLOR]
+    c) 5
+    d) 6
 
-    PHASE 2: FIND CORRECT ANSWERS FROM RED TEXT
-    - Locate the answer key section
-    - Identify answers written in RED COLOR
-    - Map each answer to its corresponding question
-    - If red text shows "1. A", then question 1 answer is A
-    - If red text shows "Answer: A", use that
+    Result: b) 4 ✅
 
-    PHASE 3: FORMAT FOR TELEGRAM POLLS
-    - Place ✅ on the CORRECT option based on red text answers
+    ✅ FINAL FORMAT:
+    1. What is 2+2?
+    a) 3
+    b) 4 ✅
+    c) 5
+    d) 6
+    Ex: Basic arithmetic.
+
+    ✅ RULES:
+    - Only look at SECOND occurrence of questions (after OMR)
+    - RED option = CORRECT answer
     - Only ONE ✅ per question
-    - Add brief explanations in {explanation_language}
+    - Explanations in {explanation_language}
+    - Follow Telegram character limits
 
-    TELEGRAM LIMITS (STRICT):
-    • Questions: ≤4096 characters
-    • Options: ≤100 characters each  
-    • Explanations: ≤200 characters
-
-    FINAL FORMAT:
-    1. [Question text]
-    a) [Option A]
-    b) [Option B]
-    c) [Option C] 
-    d) [Option D] ✅
-    Ex: [Brief explanation in {explanation_language}]
-
-    CRITICAL: 
-    - Extract ALL 30 questions, don't skip any
-    - Find answers from RED COLOR text in answer key
-    - If no red text found, use your knowledge to determine correct answers
-    - Ensure ALL content fits Telegram poll limits
+    ✅ OUTPUT ALL 30 QUESTIONS WITH RED OPTIONS MARKED AS CORRECT!
     """
     
     return {
@@ -278,10 +273,10 @@ async def process_websankul_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         file_size = os.path.getsize(file_path) / (1024 * 1024)
         
         await safe_reply(update, 
-            f"🎯 **Processing WebSankul PDF** ({file_size:.1f}MB)\n"
+            f"🎯 Processing WebSankul PDF ({file_size:.1f}MB)\n"
             f"⏰ Estimated time: 2-5 minutes\n"
-            f"🔍 Phase 1: Extracting 30 questions...\n"
-            f"🎯 Phase 2: Finding answers from red text...\n"
+            f"🔍 Phase 1: Finding second question set...\n"
+            f"🎯 Phase 2: Detecting red answers...\n"
             f"📊 Phase 3: Formatting for Telegram polls..."
         )
         
@@ -298,8 +293,8 @@ async def process_websankul_pdf(update: Update, context: ContextTypes.DEFAULT_TY
             await safe_reply(update, "❌ Failed to process WebSankul PDF. The file might be corrupted or too complex.")
             return
         
+        # Clean and format result (NO tick enforcement for WebSankul - trust the red detection)
         cleaned_result = clean_question_format(result)
-        cleaned_result = enforce_correct_answer_format(cleaned_result)
         
         question_count = len(re.findall(r'\d+\.', cleaned_result))
         
@@ -309,11 +304,10 @@ async def process_websankul_pdf(update: Update, context: ContextTypes.DEFAULT_TY
             txt_path = f.name
         
         await safe_reply(update, 
-            f"✅ **WebSankul Processing Complete!**\n"
+            f"✅ WebSankul Processing Complete!\n"
             f"📊 Extracted: {question_count}/30 questions\n"
-            f"🎯 Answers found from red text\n"
-            f"📝 Telegram Poll Ready\n"
-            f"🔍 Red Text Detection: Successful", 
+            f"🎯 Red Answer Detection: Successful\n"
+            f"📝 Telegram Poll Ready", 
             txt_path
         )
         
