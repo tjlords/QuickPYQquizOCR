@@ -38,7 +38,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["awaiting_websankul"] = False
             
             await safe_reply(update,
-                f"✅ WebSankul PDF received: `{file.file_name}`\n\n"
+                f"✅ WebSankul PDF received: {file.file_name}\n\n"
                 f"Choose processing:\n"
                 f"• /websankul_process - Extract questions + find red text answers"
             )

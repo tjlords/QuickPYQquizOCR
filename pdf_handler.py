@@ -31,12 +31,12 @@ async def pdf_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def websankul_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_websankul"] = True
     await safe_reply(update, 
-        f"🎯 **WebSankul Mode Activated**\n\n"
+        f"🎯 WebSankul Mode Activated\n\n"
         f"📄 Send me a WebSankul PDF with:\n"
         f"• 30 Questions (no tick marks)\n"
         f"• OMR page\n"
         f"• Answer key with red-colored answers\n\n"
-        f"*I'll automatically extract questions + find correct answers from red text!*"
+        f"I'll automatically extract questions + find correct answers from red text!"
     )
 
 @owner_only
