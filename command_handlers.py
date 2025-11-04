@@ -1,10 +1,14 @@
 # command_handlers.py
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import SUPPORTED_LANGUAGES
 from decorators import owner_only
 from helpers import safe_reply
+
+logger = logging.getLogger(__name__)
 
 @owner_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

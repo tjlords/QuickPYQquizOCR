@@ -1,6 +1,7 @@
 # image_handler.py
 import os
 import tempfile
+import logging
 from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -10,6 +11,8 @@ from config import *
 from decorators import owner_only
 from helpers import safe_reply, stream_b64_encode, get_mime_type, clean_question_format
 from gemini_client import call_gemini_api
+
+logger = logging.getLogger(__name__)
 
 @owner_only
 async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):

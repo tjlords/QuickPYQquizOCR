@@ -1,5 +1,6 @@
 # file_handler.py
 import tempfile
+import logging
 from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -8,6 +9,8 @@ from config import *
 from decorators import owner_only
 from helpers import safe_reply
 from image_handler import process_single_image_upload, collect_image, download_image
+
+logger = logging.getLogger(__name__)
 
 @owner_only
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -1,6 +1,7 @@
 # ai_handler.py
 import re
 import tempfile
+import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
@@ -9,6 +10,8 @@ from config import *
 from decorators import owner_only
 from helpers import safe_reply, clean_question_format, optimize_for_poll
 from gemini_client import call_gemini_api
+
+logger = logging.getLogger(__name__)
 
 @owner_only
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
