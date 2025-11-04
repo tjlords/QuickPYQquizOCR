@@ -40,7 +40,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply(update,
                 f"✅ WebSankul PDF received: `{file.file_name}`\n\n"
                 f"Choose processing:\n"
-                f"• /websankul - Extract questions + find red text answers"
+                f"• /websankul_process - Extract questions + find red text answers"
             )
             return
     
