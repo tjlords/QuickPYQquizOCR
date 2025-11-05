@@ -135,26 +135,40 @@ def clean_question_format(text: str) -> str:
     for line in lines:
         line = line.strip()
         if not line:
+            # Add blank line only between questions, not within questions
+            if current_question and not any(re.match(r'^[IIVX]+\.', l) for l in current_question):
+                cleaned_lines.append(line)
             continue
+            
+        # Check if this line starts a new question
         if re.match(r'^\d+\.\s', line) and not any(opt in line for opt in ['(A)', '(B)', '(C)', '(D)']):
+            # Process previous question if exists
             if current_question:
                 cleaned_question = process_single_question(current_question)
                 optimized_question = optimize_for_poll('\n'.join(cleaned_question))
                 cleaned_lines.extend(optimized_question.split('\n'))
+                # Add ONE blank line between questions
                 cleaned_lines.append('')
                 current_question = []
+            
             current_question.append(line)
         elif current_question:
-            current_question.append(line)
+            # Keep statements (I. II. III.) within the same question
+            if re.match(r'^[IIVX]+\.', line):
+                current_question.append(line)
+            else:
+                current_question.append(line)
         else:
             cleaned_lines.append(line)
     
+    # Process the last question
     if current_question:
         cleaned_question = process_single_question(current_question)
         optimized_question = optimize_for_poll('\n'.join(cleaned_question))
         cleaned_lines.extend(optimized_question.split('\n'))
     
-    if cleaned_lines and cleaned_lines[-1] == '':
+    # Remove trailing blank lines
+    while cleaned_lines and cleaned_lines[-1] == '':
         cleaned_lines.pop()
     
     return '\n'.join(cleaned_lines)
