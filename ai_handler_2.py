@@ -1,4 +1,4 @@
-# ai_handler.py
+# ai_handler.py discontinued 13-nov-2025
 import re
 import tempfile
 import logging
