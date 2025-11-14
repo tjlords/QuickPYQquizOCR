@@ -1,9 +1,7 @@
-# bi_handler.py — FINAL (TXT-only → Add second language only)
 
-import re
-import tempfile
-import logging
-from typing import List, Optional
+# bi_handler.py -- Parallel Translation Version (Option B)
+import re, tempfile, logging, asyncio
+from typing import List, Optional, Tuple
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -21,276 +19,185 @@ from gemini_client import call_gemini_api
 
 logger = logging.getLogger(__name__)
 
+async def update_status(msg, text: str):
+    try: await msg.edit_text(text)
+    except: pass
 
-# ------------------------
-# Status message updater
-# ------------------------
-async def update_status(msg, text):
-    try:
-        await msg.edit_text(text)
-    except:
-        pass
-
-
-# ------------------------
-# Grammar keyword sets
-# ------------------------
 ENGLISH_GRAMMAR = {
-    "noun", "pronoun", "adjective", "verb", "adverb", "preposition", "conjunction",
-    "interjection", "articles", "tenses", "active voice", "passive voice",
-    "direct speech", "indirect speech", "subject verb agreement",
-    "error detection", "error spotting", "english grammar", "parts of speech"
+    "noun","pronoun","adjective","verb","adverb","preposition","conjunction",
+    "interjection","article","articles","tenses","active voice","passive voice",
+    "direct speech","indirect speech","subject verb agreement","error detection",
+    "error spotting","cloze","fill in the blanks","sentence correction","grammar",
+    "parts of speech"
 }
 
 GUJARATI_GRAMMAR = {
-    "ગુજરાતી વ્યાકરણ", "વ્યાકરણ", "કારક", "સમાસ", "વિભક્તિ",
-    "શબ્દવિચાર", "સંધી", "અલંકાર", "રૂપક", "છંદ"
+    "ગુજરાતી વ્યાકરણ","વ્યાકરણ","કારક","સમાસ","વિભક્તિ",
+    "શબ્દવિચાર","સંધી","અલંકાર","રૂપક","છંદ"
 }
 
-
-# ------------------------
-# Translation (Gujarati → English)
-# ------------------------
-def translate_to_english(text: str) -> Optional[str]:
-    prompt = f"""
-Translate this Gujarati text into clear, simple, exam-style English (not too long):
-
-{text}
-"""
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "topK": 1,
-            "topP": 0.9,
-            "maxOutputTokens": 400,
-        },
-    }
+async def async_call_gemini(payload: dict) -> Optional[str]:
     try:
-        resp = call_gemini_api(payload)
-        if not resp:
-            return None
-        line = resp.strip().split("\n")[0].replace("```", "").strip()
-        return line
-    except:
-        return None
+        return await asyncio.to_thread(call_gemini_api, payload)
+    except: return None
 
+async def translate_to_english_async(text: str) -> Optional[str]:
+    if not text: return None
+    prompt = f"Translate to short exam English:\n{text}"
+    payload = {
+        "contents":[{"parts":[{"text":prompt}]}],
+        "generationConfig":{"temperature":0.1,"topK":1,"topP":0.9,"maxOutputTokens":256},
+    }
+    out = await async_call_gemini(payload)
+    if not out: return None
+    out = re.sub(r"```.*?```","",out,flags=re.S).strip()
+    return out.splitlines()[0].strip() if out else None
 
-# ------------------------
-# MCQ splitter (supports 01), 1), 1., (1), Q1))
-# ------------------------
-def split_mcq_blocks(text: str) -> List[str]:
-    pattern = r"\n(?=(?:Q\.?\s*)?\(?\d{1,3}\)?[.)]\s)"
-    parts = re.split(pattern, text)
+def is_mostly_english(s:str)->bool:
+    eng=len(re.findall(r"[A-Za-z]",s)); total=len(s.replace(" ",""))
+    return eng>0 and eng/max(1,total)>0.15
+
+def split_mcq_blocks(text:str)->List[str]:
+    pat=r"\n(?=(?:Q\.?\s*)?\(?\d{1,3}\)?[.)]\s)"
+    parts=re.split(pat,text)
     return [p.strip() for p in parts if p.strip()]
 
+def normalize_option_prefix(line:str)->Optional[Tuple[str,str]]:
+    m=re.match(r"^\s*\(([A-D])\)\s*(.*)$",line)
+    return (m.group(1),m.group(2).strip()) if m else None
 
-# ------------------------
-# Detect block subject mode
-# ------------------------
-def detect_mode(block: str) -> str:
-    lower = block.lower()
-
-    for kw in ENGLISH_GRAMMAR:
-        if kw in lower:
-            return "english_grammar"
-
-    if re.search(r"[\u0A80-\u0AFF]", block):   # Gujarati characters present
-        for kw in GUJARATI_GRAMMAR:
-            if kw in block:
-                return "gujarati_grammar"
-        return "bilingual"
-
-    return "bilingual"
-
-
-# ------------------------
-# Extract tick
-# ------------------------
-def detect_tick(block: str) -> Optional[str]:
-    m = re.search(r"\(([A-D])\)[^\n\r]*?✅", block)
+def detect_tick(block:str)->Optional[str]:
+    m=re.search(r"\(([A-D])\)[^\n]*?✅",block)
     return m.group(1) if m else None
 
+def detect_mode(block:str)->str:
+    low=block.lower()
+    for kw in ENGLISH_GRAMMAR:
+        if kw in low: return "english_grammar"
+    if re.search(r"[\u0A80-\u0AFF]",block):
+        for kw in GUJARATI_GRAMMAR:
+            if kw in block: return "gujarati_grammar"
+        return "bilingual"
+    return "bilingual"
 
-def normalize_option_prefix(line: str):
-    m = re.match(r"^\(([A-D])\)\s*(.*)", line)
-    if not m:
-        return None
-    return m.group(1), m.group(2).strip()
-
-
-# ------------------------
-# Process individual MCQ
-# ------------------------
-async def process_block(block: str) -> Optional[dict]:
-
-    lines = [l.strip() for l in block.splitlines() if l.strip()]
-
-    question = ""
-    options = []
-    explanation = ""
-
+async def process_block(block:str)->Optional[dict]:
+    lines=[l.strip() for l in block.splitlines() if l.strip()]
+    question=""; options=[]; explanation=""
     for ln in lines:
-        if ln.startswith(("Ex:", "EX:", "ex:")):
-            explanation = "Ex: " + ln[3:].strip()
-        elif re.match(r"^\([A-D]\)", ln):
-            parsed = normalize_option_prefix(ln)
-            if parsed:
-                options.append(parsed)
-        elif re.match(r"^\(?\d{1,3}\)?[.)]\s", ln):   # Question number
-            question = re.sub(r"^\(?\d{1,3}\)?[.)]\s*", "", ln)
+        if ln.lower().startswith("ex:"):
+            explanation="Ex: "+ln[3:].strip()
+        elif re.match(r"^\([A-D]\)",ln):
+            p=normalize_option_prefix(ln)
+            if p: options.append(p)
+        elif re.match(r"^\(?\d{1,3}\)?[.)]\s",ln):
+            question=re.sub(r"^\(?\d{1,3}\)?[.)]\s*","",ln)
         else:
-            if question == "":
-                question = ln
-            else:
-                question += " " + ln
+            question=question+" "+ln if question else ln
 
-    if not question or len(options) < 4:
-        return None
+    tick=detect_tick(block)
+    mode=detect_mode(block)
 
-    tick = detect_tick(block)
-    mode = detect_mode(block)
+    # Skip incomplete MCQs but include question
+    if not question or len(options)<4:
+        return {"question":question,"options":[],"explanation":explanation}
 
-    # ------------------------
-    # GUJARATI GRAMMAR MODE
-    # ------------------------
-    if mode == "gujarati_grammar":
-        q_out = question[:240]
-        opts_out = [f"({l}) {c}" for l, c in options]
-        if tick:
-            opts_out = [o + " ✅" if normalize_option_prefix(o)[0] == tick else o for o in opts_out]
-        return {"question": q_out, "options": opts_out, "explanation": explanation}
+    # Gujarati grammar (Gujarati only)
+    if mode=="gujarati_grammar":
+        out_opts=[f"({l}) {c}" for l,c in options]
+        if tick: out_opts=[o+" ✅" if normalize_option_prefix(o)[0]==tick else o for o in out_opts]
+        return {"question":question[:240],"options":out_opts,"explanation":explanation}
 
-    # ------------------------
-    # ENGLISH GRAMMAR MODE
-    # ------------------------
-    if mode == "english_grammar":
-        q = question if re.search(r"[A-Za-z]", question) else translate_to_english(question) or question
+    # English grammar (English only)
+    if mode=="english_grammar":
+        q_en = question if is_mostly_english(question) else (await translate_to_english_async(question) or question)
+        tasks=[]
+        for l,c in options:
+            if is_mostly_english(c): tasks.append(asyncio.create_task(asyncio.sleep(0, result=c)))
+            else: tasks.append(asyncio.create_task(translate_to_english_async(c)))
+        en_opts_raw=await asyncio.gather(*tasks)
+        out_opts=[f"({options[i][0]}) {en_opts_raw[i] or options[i][1]}" for i in range(4)]
+        if tick: out_opts=[o+" ✅" if normalize_option_prefix(o)[0]==tick else o for o in out_opts]
+        return {"question":q_en[:240],"options":out_opts,"explanation":explanation}
 
-        opts_out = []
-        for l, c in options:
-            if re.search(r"[A-Za-z]", c): en = c
-            else: en = translate_to_english(c) or c
-            opts_out.append(f"({l}) {en}")
+    # Bilingual
+    q_en = await translate_to_english_async(question) if re.search(r"[\u0A80-\u0AFF]",question) else None
+    q_out = f"{question} / {q_en}" if q_en else question
 
-        if tick:
-            opts_out = [o + " ✅" if normalize_option_prefix(o)[0] == tick else o for o in opts_out]
-
-        return {"question": q[:240], "options": opts_out, "explanation": explanation}
-
-    # ------------------------
-    # BILINGUAL MODE
-    # ------------------------
-    if re.search(r"[\u0A80-\u0AFF]", question):
-        en_q = translate_to_english(question) or ""
-        q_out = f"{question} / {en_q}" if en_q else question
-    else:
-        q_out = question
-
-    opts_out = []
-    for l, c in options:
-        if re.search(r"[\u0A80-\u0AFF]", c):
-            en = translate_to_english(c) or ""
-            line = f"({l}) {c} / {en}" if en else f"({l}) {c}"
+    tasks=[]
+    for l,c in options:
+        if re.search(r"[\u0A80-\u0AFF]",c):
+            tasks.append(asyncio.create_task(translate_to_english_async(c)))
         else:
-            line = f"({l}) {c}"
-        opts_out.append(line[:100])
+            tasks.append(asyncio.create_task(asyncio.sleep(0,result=None)))
+    en_opts=await asyncio.gather(*tasks)
 
-    if tick:
-        opts_out = [o + " ✅" if normalize_option_prefix(o)[0] == tick else o for o in opts_out]
+    out_opts=[]
+    for i,(l,c) in enumerate(options):
+        en=en_opts[i]
+        line=f"({l}) {c} / {en}" if en else f"({l}) {c}"
+        out_opts.append(line[:100])
+
+    if tick: out_opts=[o+" ✅" if normalize_option_prefix(o)[0]==tick else o for o in out_opts]
 
     if explanation:
-        guj = explanation.replace("Ex:", "").strip()
-        en = translate_to_english(guj) or ""
-        explanation = f"Ex: {guj} / {en}" if en else explanation
+        guj=explanation.replace("Ex:","").strip()
+        en=await translate_to_english_async(guj)
+        explanation=f"Ex: {guj} / {en}" if en else explanation
 
-    return {
-        "question": q_out[:240],
-        "options": opts_out,
-        "explanation": explanation[:160],
-    }
+    return {"question":q_out[:240],"options":out_opts,"explanation":explanation[:160]}
 
+def chunk_list(lst,size): return [lst[i:i+size] for i in range(0,len(lst),size)]
 
-# ------------------------
-# Chunk helper
-# ------------------------
-def chunk_list(lst, size):
-    return [lst[i:i + size] for i in range(0, len(lst), size)]
-
-
-# ------------------------
-# MAIN /bi COMMAND
-# ------------------------
 @owner_only
-async def bi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+async def bi_command(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not update.message.document:
-        await safe_reply(update, "📄 Please send the OCR TXT file.")
+        await safe_reply(update,"📄 Send TXT file.")
         return
-
-    doc = update.message.document
+    doc=update.message.document
     if not doc.file_name.lower().endswith(".txt"):
-        await safe_reply(update, "❌ Only .txt files supported.")
+        await safe_reply(update,"❌ Only TXT allowed.")
         return
 
-    status = await update.message.reply_text("⏳ Converting…")
-
-    # Download TXT
-    file_obj = await context.bot.get_file(doc.file_id)
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
+    status=await update.message.reply_text("⏳ Converting…")
+    file_obj=await context.bot.get_file(doc.file_id)
+    tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".txt").name
     await file_obj.download_to_drive(tmp)
 
-    with open(tmp, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+    text=open(tmp,"r",encoding="utf-8",errors="ignore").read()
+    blocks=split_mcq_blocks(text)
+    await update_status(status,f"📄 Detected {len(blocks)}…")
 
-    blocks = split_mcq_blocks(text)
-    await update_status(status, f"📄 Detected {len(blocks)} questions…")
-
-    converted = []
-    qno = 1
-
+    out=[]
+    qno=1
     for blk in blocks:
-        struct = await process_block(blk)
-        if struct:
-            lines = [f"{qno}. {struct['question']}"] + struct["options"]
-            if struct["explanation"]:
-                lines.append(struct["explanation"])
-            converted.append("\n".join(lines))
-        else:
-            converted.append(blk)
-        qno += 1
+        st=await process_block(blk)
+        if st:
+            lines=[f"{qno}. {st['question']}"]+st["options"]
+            if st["explanation"]: lines.append(st["explanation"])
+            out.append("\n".join(lines))
+        qno+=1
 
-    await update_status(status, "📦 Creating output…")
+    await update_status(status,"📦 Creating output…")
+    parts=chunk_list(out,15)
+    paths=[]
+    for i,part in enumerate(parts,1):
+        combined="\n\n".join(part)
+        cleaned=enforce_telegram_limits_strict(
+            enforce_correct_answer_format(
+                optimize_for_poll(
+                    clean_question_format(combined)
+                )
+            )
+        )
+        if "✅" not in cleaned: cleaned=nuclear_tick_fix(cleaned)
+        tf=tempfile.NamedTemporaryFile(mode="w",delete=False,
+                                       suffix=f"_bi_part{i}.txt",encoding="utf-8")
+        tf.write(cleaned); tf.close()
+        paths.append(tf.name)
 
-    parts = chunk_list(converted, 15)
-    paths = []
+    await update_status(status,"✅ Done!")
+    for p in paths: await safe_reply(update,"📄 Output",p)
 
-    for pi, part in enumerate(parts, start=1):
-        combined = "\n\n".join(part)
-
-        cleaned = clean_question_format(combined)
-        cleaned = optimize_for_poll(cleaned)
-        cleaned = enforce_correct_answer_format(cleaned)
-        cleaned = enforce_telegram_limits_strict(cleaned)
-        if "✅" not in cleaned:
-            cleaned = nuclear_tick_fix(cleaned)
-
-        tmpf = tempfile.NamedTemporaryFile(mode="w", delete=False,
-                                           suffix=f"_bi_part{pi}.txt",
-                                           encoding="utf-8")
-        tmpf.write(cleaned)
-        tmpf.close()
-        paths.append(tmpf.name)
-
-    await update_status(status, "✅ Done!")
-
-    for p in paths:
-        await safe_reply(update, "📄 Output", p)
-
-
-# ------------------------
-# /bi TXT file handler (needed for main_bot.py)
-# ------------------------
 @owner_only
-async def bi_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await bi_command(update, context)
+async def bi_file_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    await bi_command(update,context)
