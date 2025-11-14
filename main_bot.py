@@ -17,6 +17,9 @@ from image_handler import image_process, images_process, done_images
 from ai_handler import ai_command
 from file_handler import handle_file
 
+# ✅ Added import:
+from bi_handler import bi_command
+
 # Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +56,9 @@ def run_bot():
     application.add_handler(CommandHandler("content", content_command))
     application.add_handler(CommandHandler("websankul_process", websankul_command))
     application.add_handler(CommandHandler("ai", ai_command))
+
+    # ✅ Added new /bi command registration
+    application.add_handler(CommandHandler("bi", bi_command))
     
     # File handlers
     application.add_handler(MessageHandler(
@@ -72,7 +78,6 @@ def run_bot():
     # Start Telegram bot - v20.3 compatible
     logger.info("🤖 Starting Telegram bot polling...")
     
-    # Use polling with error handling
     try:
         application.run_polling(
             drop_pending_updates=True,
