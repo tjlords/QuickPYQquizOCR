@@ -1,327 +1,222 @@
-# image_handler.py
 import os
+import re
 import tempfile
 import logging
-import re
 from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
 
 from config import *
-from decorators import owner_only
-from helpers import safe_reply, stream_b64_encode, get_mime_type, clean_question_format, enforce_correct_answer_format
+from helpers import (
+    safe_reply,
+    clean_question_format,
+    enforce_correct_answer_format,
+    enforce_explanation_format,
+    enforce_telegram_limits_strict
+)
 from gemini_client import call_gemini_api
 
 logger = logging.getLogger(__name__)
 
-@owner_only
-async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["awaiting_image"] = True
-    await safe_reply(update,
-        f"🖼️ Send me an image file (≤{MAX_IMAGE_SIZE_MB}MB)\n\n"
-        f"*Enhanced processing with Gemini 2.5 Pro*\n"
-        f"*Automatic Telegram poll optimization*\n\n"
-        f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
-        f"*Also works with:* Telegram photos & forwarded images\n\n"
-        f"After sending, choose:\n"
-        f"• /mcq - for question images (extracts all)\n"
-        f"• /content - for content images (generates questions)"
-    )
+# ==========================================================
+# OCR CLEANER — STRICT MODE (Option A)
+# Remove all lines that are NOT part of MCQs.
+# MCQ = must contain question + (A)-(D)
+# ==========================================================
 
-@owner_only
-async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["awaiting_images"] = True
-    context.user_data["collected_images"] = []
-    await safe_reply(update,
-        f"🖼️ Send me up to {MAX_IMAGES} images one by one (≤{MAX_IMAGE_SIZE_MB}MB each)\n\n"
-        f"*Enhanced processing with Gemini 2.5 Pro*\n"
-        f"*Automatic Telegram poll optimization*\n\n"
-        f"*Supported formats:* {', '.join(SUPPORTED_IMAGE_TYPES)}\n"
-        f"*Also works with:* Telegram photos & forwarded images\n\n"
-        f"Send /done when finished, then choose:\n"
-        f"• /mcq - for question images\n"
-        f"• /content - for content images"
-    )
+def extract_clean_mcqs(text):
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-@owner_only
-async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("collected_images"):
-        await safe_reply(update, "❌ No images collected. Use /images first.")
-        return
-    
-    context.user_data["awaiting_images"] = False
-    await safe_reply(update,
-        f"✅ Collected {len(context.user_data['collected_images'])} images\n\n"
-        f"Choose processing type:\n"
-        f"• /mcq - Extract ALL questions\n"
-        f"• /content - Generate questions"
-    )
+    clean_blocks = []
+    block = []
 
-async def process_single_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    """Handle single image upload"""
-    context.user_data["awaiting_image"] = False
-    
-    try:
-        image_path = await download_image(update, context, msg)
-        if not image_path:
+    def commit_block():
+        if not block:
             return
-        
-        context.user_data["current_image"] = image_path
-        
-        await safe_reply(update,
-            f"✅ Image received\n\n"
-            f"Choose processing type:\n"
-            f"• /mcq - Extract ALL questions\n"
-            f"• /content - Generate questions"
-        )
-        
-    except Exception as e:
-        logger.error(f"Image upload error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
+        joined = "\n".join(block)
+        # Validate: must contain question + 4 options
+        if (
+            re.search(r'^\d+[.)]', joined, re.MULTILINE) and
+            re.search(r'^\(A\)', joined, re.MULTILINE) and
+            re.search(r'^\(B\)', joined, re.MULTILINE) and
+            re.search(r'^\(C\)', joined, re.MULTILINE) and
+            re.search(r'^\(D\)', joined, re.MULTILINE)
+        ):
+            clean_blocks.append(joined)
+        block.clear()
 
-async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, image_path: str, is_mcq: bool = True):
-    await update.message.reply_chat_action(ChatAction.TYPING)
-    
+    for ln in lines:
+        # If line matches question start
+        if re.match(r'^\d+[.)]', ln):
+            commit_block()
+            block.append(ln)
+            continue
+
+        # If it's option A-D
+        if re.match(r'^\([A-D]\)', ln):
+            block.append(ln)
+            continue
+
+        # If EXPLANATION
+        if ln.lower().startswith("ex"):
+            block.append(ln)
+            continue
+
+        # Ignore ALL other text (headers/garbage)
+
+    commit_block()
+    return clean_blocks
+
+
+# ==========================================================
+# OCR PROCESSING FOR SINGLE IMAGE
+# ==========================================================
+
+async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str, is_mcq: bool = True):
     try:
-        lang = context.user_data.get("language", "gujarati")
-        
-        if is_mcq:
-            await safe_reply(update, 
-                f"🔄 Processing MCQ image...\n"
-                f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
-                f"📝 Extracting Telegram-poll-optimized questions..."
-            )
-        else:
-            await safe_reply(update, 
-                f"🔄 Processing content image...\n"
-                f"🎯 Using Gemini 2.5 Pro for best quality\n"
-                f"📝 Generating Telegram-poll-ready questions..."
-            )
-        
-        data_b64 = stream_b64_encode(image_path)
-        mime_type = get_mime_type(image_path)
-        
-        payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
+        await update.message.reply_chat_action(ChatAction.TYPING)
+        await safe_reply(update, "🔍 Reading image…")
+
+        with open(file_path, "rb") as f:
+            img_data = f.read()
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"inlineData": {"mimeType": "image/jpeg", "data": img_data}},
+                    {"text": "Extract ONLY MCQs:\n• Keep question + (A)-(D)\n• Keep correct option with tick if present\n• Add brief Gujarati explanation\n• Remove ALL other text"}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096}
+        }
+
         result = call_gemini_api(payload)
-        
         if not result:
-            await safe_reply(update, "❌ Failed to process image.")
+            await safe_reply(update, "❌ OCR failed.")
             return
-        
-        # Clean and format result
-        cleaned_result = clean_question_format(result)
-        
-        # Count questions
-        question_count = len(re.findall(r'\d+\.', cleaned_result))
-        
-        # Save and send results
-        file_type = "mcq" if is_mcq else "content"
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
-                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
-            f.write(cleaned_result)
-            txt_path = f.name
-        
-        action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} {question_count} Telegram-poll-ready questions from image", txt_path)
-        
-    except Exception as e:
-        logger.error(f"Image processing error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
-    finally:
-        # Cleanup
-        if 'image_path' in locals():
-            try:
-                os.unlink(image_path)
-                logger.info("Cleaned up input image")
-                context.user_data.pop("current_image", None)
-            except Exception as e:
-                logger.error(f"Error cleaning image: {e}")
 
-async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE, is_mcq: bool = True):
-    await update.message.reply_chat_action(ChatAction.TYPING)
-    
+        # Strict cleaning
+        mcqs = extract_clean_mcqs(result)
+        if not mcqs:
+            await safe_reply(update, "❌ No MCQs detected.")
+            return
+
+        final_out = []
+        qn = 1
+
+        for block in mcqs:
+            # Clean + format
+            block = clean_question_format(block)
+            block = enforce_correct_answer_format(block)
+            block = enforce_explanation_format(block)
+            block = enforce_telegram_limits_strict(block)
+
+            # Fix numbering 1) instead of 1.
+            block = re.sub(r'^(\d+)[.)]', lambda m: f"{m.group(1)})", block)
+
+            # Re-append with correct question number
+            block = re.sub(r'^\d+\)', f"{qn})", block)
+            final_out.append(block)
+            qn += 1
+
+        final_text = "\n\n".join(final_out)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", delete=False, encoding="utf-8", suffix="_mcq.txt"
+        ) as f:
+            f.write(final_text)
+            out_path = f.name
+
+        await safe_reply(update, "✅ Extracted MCQs", out_path)
+
+    except Exception as e:
+        logger.error(f"Image OCR error: {e}")
+        await safe_reply(update, f"❌ Error: {e}")
+
+
+# ==========================================================
+# MULTIPLE IMAGES
+# ==========================================================
+
+async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE, is_mcq=True):
     images = context.user_data.get("collected_images", [])
     if not images:
-        await safe_reply(update, "❌ No images to process")
+        await safe_reply(update, "❌ No images collected.")
         return
-    
-    try:
-        lang = context.user_data.get("language", "gujarati")
-        
-        if is_mcq:
-            await safe_reply(update, 
-                f"🔄 Processing {len(images)} MCQ images...\n"
-                f"🎯 Using Gemini 2.5 Pro for highest accuracy\n"
-                f"📝 Extracting Telegram-poll-optimized questions..."
-            )
-        else:
-            await safe_reply(update, 
-                f"🔄 Processing {len(images)} content images...\n"
-                f"🎯 Using Gemini 2.5 Pro for best quality\n"
-                f"📝 Generating Telegram-poll-ready questions..."
-            )
-        
-        # Process first image
-        image_path = images[0]
-        data_b64 = stream_b64_encode(image_path)
-        mime_type = get_mime_type(image_path)
-        
-        payload = create_image_prompt(data_b64, mime_type, lang, is_mcq)
-        result = call_gemini_api(payload)
-        
-        if not result:
-            await safe_reply(update, "❌ Failed to generate questions from images")
-            return
-        
-        # Clean and format result
-        cleaned_result = clean_question_format(result)
-        
-        # Count questions
-        question_count = len(re.findall(r'\d+\.', cleaned_result))
-        
-        # Save and send results
-        file_type = "mcq" if is_mcq else "content"
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
-                                       suffix=f"_{file_type}_questions.txt", delete=False) as f:
-            f.write(cleaned_result)
-            txt_path = f.name
-        
-        action = "extracted" if is_mcq else "generated"
-        await safe_reply(update, f"✅ Successfully {action} {question_count} Telegram-poll-ready questions from {len(images)} images", txt_path)
-        
-    except Exception as e:
-        logger.error(f"Multiple images processing error: {e}")
-        await safe_reply(update, f"❌ Error: {str(e)}")
-    finally:
-        # Cleanup all input images
-        for image_path in context.user_data.get("collected_images", []):
-            try:
-                os.unlink(image_path)
-            except Exception as e:
-                logger.error(f"Error cleaning image {image_path}: {e}")
-        
-        context.user_data["awaiting_images"] = False
-        context.user_data["collected_images"] = []
-        logger.info("Cleaned up all input images")
+
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    await safe_reply(update, f"🔍 Processing {len(images)} images…")
+
+    all_mcqs = []
+    qn = 1
+
+    for img in images:
+        try:
+            with open(img, "rb") as f:
+                img_data = f.read()
+
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"inlineData": {"mimeType": "image/jpeg", "data": img_data}},
+                        {"text": "Extract ONLY MCQs:\n• Keep question + (A)-(D)\n• Keep correct option with tick if present\n• Add brief Gujarati explanation\n• Remove ALL other text"}
+                    ]
+                }],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096}
+            }
+
+            result = call_gemini_api(payload)
+            if not result:
+                continue
+
+            mcqs = extract_clean_mcqs(result)
+            for block in mcqs:
+                block = clean_question_format(block)
+                block = enforce_correct_answer_format(block)
+                block = enforce_explanation_format(block)
+                block = enforce_telegram_limits_strict(block)
+
+                block = re.sub(r'^(\d+)[.)]', lambda m: f"{m.group(1)})", block)
+                block = re.sub(r'^\d+\)', f"{qn})", block)
+                all_mcqs.append(block)
+                qn += 1
+
+        except Exception as e:
+            logger.error(f"OCR image loop error: {e}")
+
+    if not all_mcqs:
+        await safe_reply(update, "❌ No MCQs detected in images.")
+        return
+
+    final_text = "\n\n".join(all_mcqs)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", delete=False, encoding="utf-8", suffix="_mcq.txt"
+    ) as f:
+        f.write(final_text)
+        out_path = f.name
+
+    await safe_reply(update, "✅ Extracted MCQs", out_path)
+
+
+# ==========================================================
+# IMAGE COLLECTION HANDLERS
+# ==========================================================
+
+async def process_single_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
+    # Save single image for /image
+    context.user_data["current_image"] = await download_image(msg)
+    await safe_reply(update, "📸 Image received.\nUse /mcq or /content.")
+
 
 async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    images = context.user_data.get("collected_images", [])
-    
-    if len(images) >= MAX_IMAGES:
-        await safe_reply(update, f"❌ Maximum {MAX_IMAGES} images reached. Send /done to process.")
-        return
-    
-    try:
-        image_path = await download_image(update, context, msg)
-        if image_path:
-            images.append(image_path)
-            context.user_data["collected_images"] = images
-            await safe_reply(update, f"✅ Image {len(images)}/{MAX_IMAGES} received. Send more or /done")
-    except Exception as e:
-        logger.error(f"Image collection error: {e}")
-        await safe_reply(update, f"❌ Error collecting image: {str(e)}")
+    # Save images for /images
+    img_path = await download_image(msg)
+    if "collected_images" not in context.user_data:
+        context.user_data["collected_images"] = []
 
-async def download_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    try:
-        file = None
-        ext = ".jpg"  # Default extension
-        
-        if msg.document:
-            file_obj = msg.document
-            ext = Path(file_obj.file_name).suffix.lower()
-            if ext not in SUPPORTED_IMAGE_TYPES:
-                await safe_reply(update, f"❌ Unsupported image format. Use: {', '.join(SUPPORTED_IMAGE_TYPES)}")
-                return None
-                
-            if file_obj.file_size > MAX_IMAGE_SIZE_MB * 1024 * 1024:
-                await safe_reply(update, f"❌ Image too large. Max {MAX_IMAGE_SIZE_MB}MB")
-                return None
-                
-            file = await file_obj.get_file()
-            
-        elif msg.photo:
-            # Get the largest photo size (works with forwarded photos too)
-            file_obj = msg.photo[-1]
-            file = await file_obj.get_file()
-            ext = ".jpg"
-        else:
-            return None
-        
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-            image_path = tmp_file.name
-        
-        # Download the file
-        await file.download_to_drive(image_path)
-        return image_path
-        
-    except Exception as e:
-        logger.error(f"Image download error: {e}")
-        await safe_reply(update, f"❌ Error downloading image: {str(e)}")
-        return None
+    context.user_data["collected_images"].append(img_path)
+    count = len(context.user_data["collected_images"])
 
-def create_image_prompt(data_b64: str, mime_type: str, explanation_language: str, is_mcq: bool = True):
-    if is_mcq:
-        prompt_text = f"""
-        Extract ALL questions from this image.
-
-        TELEGRAM POLL LIMITS:
-        • Question: 4096 chars max
-        • Explanation: 200 chars max  
-        • Options: ~100 chars each
-
-        RULES:
-        1. Preserve exact text from image
-        2. Explanations under 200 chars in {explanation_language}
-        3. Convert 1., 2., 3. → 1), 2), 3)
-        4. Extract every question
-
-        FORMAT:
-        [Number]. [Question]
-        a) [Option A]
-        b) [Option B]
-        c) [Option C]
-        d) [Option D] ✅
-        Ex: [Short explanation in {explanation_language}]
-
-        Ensure all content fits Telegram limits.
-        """
-    else:
-        question_count = 25
-        prompt_text = f"""
-        Create {question_count} questions from this image.
-
-        TELEGRAM LIMITS:
-        • Question: 4096 chars
-        • Explanation: 200 chars
-        • Options: ~100 chars
-
-        Generate {question_count} questions with:
-        - Questions under 4096 characters
-        - Options under 100 characters
-        - Explanations under 200 characters in {explanation_language}
-
-        FORMAT:
-        [Number]. [Question]
-        a) [Option A] 
-        b) [Option B]
-        c) [Option C]
-        d) [Option D] ✅
-        Ex: [Brief explanation in {explanation_language}]
-
-        Keep all content within Telegram poll limits.
-        """
-    
-    return {
-        "contents": [{
-            "parts": [
-                {"inlineData": {"mimeType": mime_type, "data": data_b64}},
-                {"text": prompt_text}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 8192,
-        }
-    }
+    await safe_reply(update, f"✅ Image {count} received. Send more or /done")
