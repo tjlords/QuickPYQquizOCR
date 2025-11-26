@@ -220,3 +220,35 @@ async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg)
     count = len(context.user_data["collected_images"])
 
     await safe_reply(update, f"✅ Image {count} received. Send more or /done")
+# ==========================================================
+# IMAGE COMMAND ENTRYPOINTS (RESTORED)
+# ==========================================================
+
+from telegram.ext import ContextTypes
+
+@owner_only
+async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when user sends /image (single image mode)"""
+    context.user_data.clear()
+    context.user_data["awaiting_image"] = True
+    await safe_reply(update, "📸 Send ONE image now.")
+
+@owner_only
+async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when user sends /images (multiple images mode)"""
+    context.user_data.clear()
+    context.user_data["awaiting_images"] = True
+    context.user_data["collected_images"] = []
+    await safe_reply(update, "📸 Send images one by one. When finished, type /done.")
+
+@owner_only
+async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when user finishes sending multiple images"""
+    if not context.user_data.get("collected_images"):
+        await safe_reply(update, "❌ No images received yet.")
+        return
+    await safe_reply(
+        update,
+        f"✅ Collected {len(context.user_data['collected_images'])} images\n\nChoose processing:\n• /mcq\n• /content"
+    )
+    
