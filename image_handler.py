@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import tempfile
 import logging
 from pathlib import Path
@@ -22,18 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 # ======================================================================
-#              STRICT MCQ EXTRACTOR – OPTION A (Only MCQs)
+#                STRICT MCQ EXTRACTOR (ONLY MCQ BLOCKS)
 # ======================================================================
 
 def extract_clean_mcqs(text: str):
-    """
-    Remove EVERY line that is not part of a valid MCQ:
-    - Question starts with "1." or "1)"
-    - Options must include (A), (B), (C), (D)
-    - Explanation optional
-    """
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-
     clean_blocks = []
     block = []
 
@@ -42,7 +36,7 @@ def extract_clean_mcqs(text: str):
             return
         joined = "\n".join(block)
 
-        # Must contain Q + A + B + C + D
+        # Valid MCQ must contain question + A/B/C/D
         if (
             re.search(r'^\d+[.)]', joined, re.MULTILINE) and
             re.search(r'^\(A\)', joined, re.MULTILINE) and
@@ -55,66 +49,72 @@ def extract_clean_mcqs(text: str):
         block.clear()
 
     for ln in lines:
-
-        # Question detected
+        # Question start
         if re.match(r'^\d+[.)]', ln):
             commit_block()
             block.append(ln)
             continue
 
-        # Option found
+        # Options A–D
         if re.match(r'^\([A-D]\)', ln):
             block.append(ln)
             continue
 
-        # Explanation (optional)
+        # Explanation
         if ln.lower().startswith("ex"):
             block.append(ln)
             continue
 
-        # All other text is ignored
+        # IGNORE all other text
 
     commit_block()
     return clean_blocks
 
 
 # ======================================================================
-#                     IMAGE DOWNLOAD HANDLER
+#                       DOWNLOAD IMAGE FROM TELEGRAM
 # ======================================================================
 
 async def download_image(msg):
-    """Download image sent by user to local tmp path."""
     file = msg.photo[-1] if msg.photo else msg.document
     tg_file = await file.get_file()
-
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
     await tg_file.download_to_drive(tmp.name)
     return tmp.name
 
 
 # ======================================================================
-#                   PROCESS SINGLE IMAGE → OCR
+#                       PROCESS SINGLE IMAGE (BASE64 FIX)
 # ======================================================================
 
 async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str, is_mcq=True):
+
     try:
         await update.message.reply_chat_action(ChatAction.TYPING)
         await safe_reply(update, "🔍 Reading image…")
 
         with open(file_path, "rb") as f:
-            img_data = f.read()
+            img_bytes = f.read()
+
+        # BASE64 FIX
+        img_b64 = base64.b64encode(img_bytes).decode()
 
         payload = {
             "contents": [{
                 "parts": [
-                    {"inlineData": {"mimeType": "image/jpeg", "data": img_data}},
+                    {
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": img_b64
+                        }
+                    },
                     {
                         "text":
                         "Extract ONLY MCQs:\n"
                         "• Keep question + (A)-(D)\n"
                         "• Keep correct option with tick if present\n"
-                        "• Generate Gujarati explanation\n"
-                        "• REMOVE all other text"
+                        "• Add short Gujarati explanation\n"
+                        "• REMOVE all headings, bullets, extra text"
                     }
                 ]
             }],
@@ -128,11 +128,10 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
 
         mcqs = extract_clean_mcqs(raw)
         if not mcqs:
-            await safe_reply(update, "❌ No MCQs detected.")
+            await safe_reply(update, "❌ No MCQs detected in image.")
             return
 
-        # Final clean + formatting
-        out_blocks = []
+        final_blocks = []
         qn = 1
 
         for b in mcqs:
@@ -141,31 +140,30 @@ async def process_single_image(update: Update, context: ContextTypes.DEFAULT_TYP
             b = enforce_explanation_format(b)
             b = enforce_telegram_limits_strict(b)
 
-            # Convert "1." or "1)" → "1)"
+            # Normalize numbering
             b = re.sub(r'^(\d+)[.)]', lambda m: f"{m.group(1)})", b)
-
-            # Force correct numbering
             b = re.sub(r'^\d+\)', f"{qn})", b)
-            out_blocks.append(b)
+
+            final_blocks.append(b)
             qn += 1
 
-        final_output = "\n\n".join(out_blocks)
+        final_text = "\n\n".join(final_blocks)
 
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", delete=False, suffix="_mcq.txt"
         ) as f:
-            f.write(final_output)
+            f.write(final_text)
             out_path = f.name
 
         await safe_reply(update, "✅ Extracted MCQs", out_path)
 
     except Exception as e:
-        logger.error(f"OCR error: {e}")
+        logger.error(f"Single image OCR error: {e}")
         await safe_reply(update, f"❌ Error: {e}")
 
 
 # ======================================================================
-#           PROCESS MULTIPLE IMAGES → OCR (MCQ ONLY)
+#                 PROCESS MULTIPLE IMAGES (BASE64 FIX)
 # ======================================================================
 
 async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_TYPE, is_mcq=True):
@@ -184,18 +182,25 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
     for img in images:
         try:
             with open(img, "rb") as f:
-                img_data = f.read()
+                img_bytes = f.read()
+
+            img_b64 = base64.b64encode(img_bytes).decode()
 
             payload = {
                 "contents": [{
                     "parts": [
-                        {"inlineData": {"mimeType": "image/jpeg", "data": img_data}},
+                        {
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
+                                "data": img_b64
+                            }
+                        },
                         {
                             "text":
                             "Extract ONLY MCQs:\n"
                             "• Keep question + (A)-(D)\n"
-                            "• Keep correct option with tick if present\n"
-                            "• Generate Gujarati explanation\n"
+                            "• Keep tick if present\n"
+                            "• Add Gujarati explanation\n"
                             "• REMOVE all other text"
                         }
                     ]
@@ -221,45 +226,42 @@ async def process_multiple_images(update: Update, context: ContextTypes.DEFAULT_
                 qn += 1
 
         except Exception as e:
-            logger.error(f"OCR image batch error: {e}")
+            logger.error(f"Multiple image OCR error: {e}")
 
     if not final_blocks:
-        await safe_reply(update, "❌ No MCQs detected.")
+        await safe_reply(update, "❌ No MCQs detected in images.")
         return
 
-    final_output = "\n\n".join(final_blocks)
+    final_text = "\n\n".join(final_blocks)
 
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", delete=False, suffix="_mcq.txt"
     ) as f:
-        f.write(final_output)
+        f.write(final_text)
         out_path = f.name
 
     await safe_reply(update, "✅ Extracted MCQs", out_path)
 
 
 # ======================================================================
-#                         IMAGE UPLOAD FLOWS
+#                       IMAGE MODE COMMANDS
 # ======================================================================
 
 @owner_only
 async def image_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start single-image OCR mode."""
     context.user_data.clear()
     context.user_data["awaiting_image"] = True
     await safe_reply(update, "📸 Send ONE image now.")
 
 @owner_only
 async def images_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start multiple-images OCR mode."""
     context.user_data.clear()
     context.user_data["awaiting_images"] = True
     context.user_data["collected_images"] = []
-    await safe_reply(update, "📸 Send images one-by-one, then type /done")
+    await safe_reply(update, "📸 Send images one-by-one, then type /done.")
 
 @owner_only
 async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User finished sending images."""
     imgs = context.user_data.get("collected_images", [])
     if not imgs:
         await safe_reply(update, "❌ No images received yet.")
@@ -272,19 +274,16 @@ async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================================================================
-#               HANDLE IMAGE FILE FROM USER
+#                   HANDLE IMAGE AS USER SENDS IT
 # ======================================================================
 
 async def process_single_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    """When user sends ONE /image photo."""
     file_path = await download_image(msg)
     context.user_data["current_image"] = file_path
     await safe_reply(update, "📸 Image received.\nUse /mcq or /content")
 
 async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
-    """When user sends image in /images mode."""
     file_path = await download_image(msg)
     context.user_data["collected_images"].append(file_path)
     count = len(context.user_data["collected_images"])
-
     await safe_reply(update, f"✅ Image {count} received. Send more or /done")
