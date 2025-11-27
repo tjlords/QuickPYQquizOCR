@@ -3,6 +3,7 @@ import os
 import re
 import json
 import time
+import math
 import logging
 import tempfile
 from pathlib import Path
@@ -18,47 +19,34 @@ from gemini_client import call_gemini_api
 logger = logging.getLogger(__name__)
 
 # ---------------------------
-# Utilities
+# Helpers
 # ---------------------------
 def extract_json_substring(s: str):
-    """
-    Attempt to find the first JSON array or object substring in s.
-    """
-    s = s.strip()
-    # try direct parse
+    s = (s or "").strip()
     try:
         return json.loads(s)
     except Exception:
         pass
-
-    # find first [ ... ] block
     m = re.search(r'(\[.*\])', s, flags=re.S)
     if m:
         try:
             return json.loads(m.group(1))
         except Exception:
             pass
-
-    # find first { ... } block (single object or arrayless) - wrap in list
     m = re.search(r'(\{.*\})', s, flags=re.S)
     if m:
         try:
-            obj = json.loads(m.group(1))
-            return [obj]
+            return [json.loads(m.group(1))]
         except Exception:
             pass
-
     return None
 
-
 def normalize_question_text(q: str):
-    s = q.strip()
-    # remove leading numbering like "Q.14", "14)", "14."
+    s = q or ""
     s = re.sub(r'^[Qq]\.?\s*', '', s)
     s = re.sub(r'^\d+\s*[).:-]\s*', '', s)
     s = re.sub(r'\s+', ' ', s)
     return s.strip().lower()
-
 
 def remove_duplicates_by_question(arr):
     seen = set()
@@ -70,189 +58,205 @@ def remove_duplicates_by_question(arr):
             out.append(item)
     return out
 
-
 # ---------------------------
-# Gemini prompts
+# Prompts
 # ---------------------------
-COUNT_PROMPT = """You will get the text contents of a PDF chunk (or the whole PDF pages). Count how many multiple-choice questions (MCQs) are in the input. Return ONLY the integer (for example: 23). Do not output anything else."""
-# JSON extraction prompt - Option B format; ranges included for batching
-JSON_BATCH_PROMPT_TEMPLATE = """You will be given either PDF content or OCR text. Extract the specified MCQs and output a JSON array ONLY (no explanation, no commentary). 
-Each entry must be an object with exactly these keys:
-"question" (string), 
-"options" (object with keys "A","B","C","D" each mapping to a string), 
-"answer" (single letter "A"/"B"/"C"/"D"), 
-"explanation" (short Gujarati string).
+COUNT_PROMPT = """You will be given a PDF. Count how many multiple-choice questions (MCQs) are present in the document. Return ONLY the integer (e.g. 23)."""
+JSON_BATCH_PROMPT_TEMPLATE = """You are given a PDF. Extract MCQs {start}-{end} (inclusive) ONLY from the PDF. Output strictly VALID JSON (no extra text) as an array of objects. Each object must use Option-B format:
 
-EXTRACT QUESTIONS NUMBER {start} TO {end} (inclusive).
-Do NOT repeat questions previously requested.
-If a question does not have 4 options, SKIP it.
-Output strictly valid JSON array in Option-B format.
+{{
+ "question": "...",
+ "options": {{"A":"...","B":"...","C":"...","D":"..."}},
+ "answer": "A",
+ "explanation": "..."
+}}
+
+Rules:
+- Only include MCQs that have four options (A,B,C,D). Skip incomplete items.
+- Keep explanations short (≤160 chars) in Gujarati.
+- Do not repeat any question previously extracted.
+- Output only JSON array.
 """
 
-# ---------------------------
-# Batch extraction function
-# ---------------------------
-def call_gemini_for_json(prompt_payload):
-    """
-    Wrapper for call_gemini_api; returns string (raw model output) or raises.
-    """
-    out = call_gemini_api(prompt_payload)
-    return out
+def call_gemini_safe(payload):
+    try:
+        return call_gemini_api(payload)
+    except Exception as e:
+        logger.exception("Gemini call failed: %s", e)
+        return None
 
-
+# ---------------------------
+# Main PDF JSON processor
+# ---------------------------
 @owner_only
 async def pdf_json_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /pdf-json  (or reuse existing command name)
-    - expects context.user_data['current_file'] to be present (path)
-    - splits into batches automatically, returns merged JSON
+    /pdf (JSON mode). Expects context.user_data['current_file'] to be set.
+    Produces a single JSON file (Option-B) containing extracted MCQs.
+    Silent mode: only final file and summary message returned.
     """
     if not context.user_data.get("current_file"):
-        await safe_reply(update, "❌ No PDF found. Send PDF using /pdf")
+        await safe_reply(update, "❌ No PDF found. Send a PDF using /pdf")
         return
 
     file_path = context.user_data["current_file"]
     await update.message.reply_chat_action(ChatAction.TYPING)
-    await safe_reply(update, "🔄 Starting JSON extraction from PDF… this may take a few rounds.")
+    await safe_reply(update, "🔄 Starting JSON extraction (this may take a few rounds)…")
 
     try:
-        # encode pdf
         data_b64 = stream_b64_encode(file_path)
 
-        # 1) Ask model to count MCQs
-        count_payload = {
-            "contents": [{
-                "parts": [
-                    {"inlineData": {"mimeType": "application/pdf", "data": data_b64}},
-                    {"text": COUNT_PROMPT}
-                ]
-            }],
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 64}
-        }
-
-        raw_count_resp = call_gemini_for_json(count_payload)
-        if not raw_count_resp:
-            await safe_reply(update, "❌ Counting MCQs failed.")
-            return
-
-        # try to extract integer
-        raw_text = str(raw_count_resp).strip()
-        m = re.search(r'(\d+)', raw_text)
-        total_questions = int(m.group(1)) if m else None
-
-        # if model failed to count, we fall back to an iterative attempt:
-        if not total_questions:
-            # assume unknown length: we'll keep extracting until no new questions are found
-            total_questions = None
-
-        batch_size = 10
-        extracted = []
-        last_extracted = 0
-        attempts = 0
-        max_attempts = 25  # safety
-        while True:
-            attempts += 1
-            if attempts > max_attempts:
-                logger.warning("Reached max attempts while extracting PDF JSON")
-                break
-
-            start = last_extracted + 1
-            # if we know total_questions, clamp
-            if total_questions:
-                end = min(last_extracted + batch_size, total_questions)
-            else:
-                end = last_extracted + batch_size
-
-            # build prompt payload (include PDF inline)
-            payload = {
+        # 1) Ask for count (best-effort)
+        total_questions = None
+        try:
+            count_payload = {
                 "contents": [{
                     "parts": [
                         {"inlineData": {"mimeType": "application/pdf", "data": data_b64}},
-                        {"text": JSON_BATCH_PROMPT_TEMPLATE.format(start=start, end=end)}
+                        {"text": COUNT_PROMPT}
                     ]
                 }],
-                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192}
+                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 64}
             }
+            raw_count = call_gemini_safe(count_payload)
+            if raw_count:
+                m = re.search(r'(\d+)', str(raw_count))
+                if m:
+                    total_questions = int(m.group(1))
+        except Exception:
+            total_questions = None
 
-            resp = call_gemini_for_json(payload)
-            if not resp:
-                logger.warning("Empty model response for batch %s-%s", start, end)
-                # if we know total_questions and we tried this chunk, proceed to next
-                if total_questions and end >= total_questions:
+        # Settings
+        batch_size = 5  # user requested
+        max_total_batches = 12  # safety cap (5*12 = 60 questions)
+        extracted = []
+        last_extracted = 0
+        batch_index = 0
+        consecutive_empty_batches = 0
+
+        # compute max batches if total_questions known
+        if total_questions:
+            estimated_batches = math.ceil(total_questions / batch_size)
+            max_batches = min(estimated_batches + 2, max_total_batches)  # small buffer
+        else:
+            max_batches = max_total_batches
+
+        # Loop batches
+        while batch_index < max_batches:
+            start_q = batch_index * batch_size + 1
+            end_q = start_q + batch_size - 1
+
+            # don't request beyond known total if total known
+            if total_questions and end_q > total_questions:
+                end_q = total_questions
+
+            # Build prompt and call model with up to 2 retries if zero items returned
+            retries = 0
+            batch_parsed_count = 0
+            batch_items = []
+
+            while retries < 2:
+                prompt_text = JSON_BATCH_PROMPT_TEMPLATE.format(start=start_q, end=end_q)
+                payload = {
+                    "contents": [{
+                        "parts": [
+                            {"inlineData": {"mimeType": "application/pdf", "data": data_b64}},
+                            {"text": prompt_text}
+                        ]
+                    }],
+                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192}
+                }
+
+                resp = call_gemini_safe(payload)
+                if not resp:
+                    retries += 1
+                    time.sleep(0.3)
+                    continue
+
+                parsed = extract_json_substring(str(resp))
+                if not parsed:
+                    retries += 1
+                    time.sleep(0.3)
+                    continue
+
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+
+                # Validate and normalize parsed objects
+                new_items = []
+                for obj in parsed:
+                    if not isinstance(obj, dict):
+                        continue
+                    opts = obj.get("options", {})
+                    if not all(k in opts for k in ("A", "B", "C", "D")):
+                        continue
+                    q_text = obj.get("question", "").strip()
+                    if not q_text:
+                        continue
+                    new_items.append({
+                        "question": q_text,
+                        "options": {
+                            "A": opts["A"].strip(),
+                            "B": opts["B"].strip(),
+                            "C": opts["C"].strip(),
+                            "D": opts["D"].strip()
+                        },
+                        "answer": (obj.get("answer", "") or "").strip(),
+                        "explanation": (obj.get("explanation", "") or "").strip()
+                    })
+
+                # Deduplicate new items against already extracted
+                combined = extracted + new_items
+                combined = remove_duplicates_by_question(combined)
+                new_count_total = len(combined)
+                batch_parsed_count = new_count_total - len(extracted)
+
+                if batch_parsed_count > 0:
+                    # accept these items and move to next batch
+                    extracted = combined
                     break
-                # else attempt again (up to attempts limit)
-                continue
+                else:
+                    # no new items found in this attempt
+                    retries += 1
+                    time.sleep(0.3)
 
-            # parse JSON out
-            parsed = extract_json_substring(str(resp))
-            if not parsed:
-                logger.warning("Could not parse JSON for batch %s-%s; raw len=%d", start, end, len(str(resp)))
-                # attempt to find a small JSON inside resp and continue
-                # skip this batch to prevent infinite loop
-                if total_questions and end >= total_questions:
-                    break
-                # else continue to next batch attempt (to avoid hang)
-                last_extracted = end
-                continue
+            # End of batch retries
+            if batch_parsed_count == 0:
+                consecutive_empty_batches += 1
+            else:
+                consecutive_empty_batches = 0
 
-            # ensure list
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-
-            # normalize and append
-            new_count = 0
-            for obj in parsed:
-                # validate required keys
-                if not isinstance(obj, dict):
-                    continue
-                if "question" not in obj or "options" not in obj or "answer" not in obj:
-                    continue
-                # ensure options keys A-D present
-                opts = obj.get("options", {})
-                if not all(k in opts for k in ["A", "B", "C", "D"]):
-                    continue
-                extracted.append({
-                    "question": obj["question"].strip(),
-                    "options": {
-                        "A": opts["A"].strip(),
-                        "B": opts["B"].strip(),
-                        "C": opts["C"].strip(),
-                        "D": opts["D"].strip()
-                    },
-                    "answer": obj["answer"].strip() if isinstance(obj["answer"], str) else str(obj["answer"]),
-                    "explanation": obj.get("explanation", "").strip()
-                })
-                new_count += 1
-
-            logger.info("Batch %s-%s returned %d parsed items", start, end, new_count)
-
-            # deduplicate as we go
-            extracted = remove_duplicates_by_question(extracted)
+            batch_index += 1
 
             # update counters
             last_extracted = len(extracted)
 
-            # decide stop
-            if total_questions:
-                if last_extracted >= total_questions:
-                    break
-            else:
-                # heuristics: if parsed returned < batch_size => probably last
-                if new_count < batch_size:
-                    break
-                # safeguard: if we are extracting a lot, stop when we get no growth
-                # loop will continue requesting next (start..end) which will be shifted
-                # to avoid exact repetition, we increment last_extracted by parsed length
-                # already done above.
+            # Stop conditions (silent)
+            if total_questions and last_extracted >= total_questions:
+                break
+            # If two consecutive empty batches, stop (likely no more questions)
+            if consecutive_empty_batches >= 2:
+                break
+            # If batch returned fewer than requested and we reached known total end, stop
+            if total_questions and end_q >= total_questions:
+                break
 
-            # Small delay to avoid throttling
-            time.sleep(0.5)
+            # Safety: if we've processed all estimated batches for known total, stop
+            if total_questions and batch_index >= math.ceil(total_questions / batch_size) + 1:
+                break
+
+            # Small backoff to avoid throttling
+            time.sleep(0.25)
 
         # Final dedupe
         merged = remove_duplicates_by_question(extracted)
 
         if not merged:
-            await safe_reply(update, "❌ No MCQs extracted from PDF.")
+            # Still return empty JSON file to keep behavior consistent
+            with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8", suffix="_mcqs.json") as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+                out_path = f.name
+            await safe_reply(update, f"✅ Extracted 0 MCQs (JSON)", out_path)
             return
 
         # Save merged json
@@ -261,11 +265,10 @@ async def pdf_json_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out_path = f.name
 
         await safe_reply(update, f"✅ Extracted {len(merged)} MCQs (JSON)", out_path)
-        return
 
     except Exception as e:
         logger.exception("PDF JSON extraction failed")
         await safe_reply(update, f"❌ Error during PDF processing: {e}")
     finally:
-        # keep PDF file (don't delete here) — let your existing cleanup handle it if needed
+        # keep PDF file; existing cleanup can remove it if desired
         pass
